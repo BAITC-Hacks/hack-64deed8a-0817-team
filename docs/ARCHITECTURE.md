@@ -8,22 +8,22 @@
 
 ```mermaid
 flowchart TD
-    A[Agent.act(env)] --> B[safety net: try/except вокруг _act]
-    B --> C[Подключить priors_history.get_prior]
-    C --> D[build_cells: ячейки tariff × arpu_segment]
-    D --> E[ExplorerV4.candidates: одна upsell-цель на ячейку, ранг prior × size × ARPU]
-    E --> F[Раунд 1: топ-10 ячеек, sms n=150, самый дешёвый срез]
-    F --> G[Подтверждение: топ-3 по наблюдённому ratio, n=200, до 5 пилотов]
-    G --> H[Остаток пилотов: скрининг следующих неисследованных ячеек, n=150]
-    H --> I[PlannerV4.qualifying: pooled pilot > 0 и posterior mean > 0]
-    I --> J[Канал и размер по экономике планировщика; лимиты reach/money/5000/10]
-    J --> K{Есть кампании?}
-    K -->|да| L[Вернуть до 10 кампаний, по одной на ячейку]
-    K -->|нет| M[Fallback: кампания, не задевающая никого]
-    L --> N{AGENT_USE_LLM=1 и ключ?}
+    A["Agent.act(env)"] --> B["safety net: try/except вокруг _act"]
+    B --> C["Подключить priors_history.get_prior"]
+    C --> D["build_cells: ячейки tariff × arpu_segment"]
+    D --> E["ExplorerV4.candidates: одна upsell-цель на ячейку, ранг prior × size × ARPU"]
+    E --> F["Раунд 1: топ-10 ячеек, sms n=150, самый дешёвый срез"]
+    F --> G["Подтверждение: топ-3 по наблюдённому ratio, n=200, до 5 пилотов"]
+    G --> H["Остаток пилотов: скрининг следующих неисследованных ячеек, n=150"]
+    H --> I["PlannerV4.qualifying: pooled pilot > 0 и posterior mean > 0"]
+    I --> J["Канал и размер по экономике планировщика; лимиты reach/money/5000/10"]
+    J --> K{"Есть кампании?"}
+    K -->|да| L["Вернуть до 10 кампаний, по одной на ячейку"]
+    K -->|нет| M["Fallback: кампания, не задевающая никого"]
+    L --> N{"AGENT_USE_LLM=1 и ключ?"}
     M --> N
-    N -->|да| O[review_finals: может только удалить]
-    N -->|нет| P[Вернуть список]
+    N -->|да| O["review_finals: может только удалить"]
+    N -->|нет| P["Вернуть список"]
 ```
 
 ## Политика v4 (`agent_core/v4.py`)
