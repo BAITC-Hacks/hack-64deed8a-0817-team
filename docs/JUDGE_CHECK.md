@@ -38,8 +38,8 @@ blob hash `be963a4c95c7360bbfdfbaa9f7387e8acb8b37ae`.
   checked on 3.11. The pinned requirements and all README checks also worked
   on 3.13.9 here, so 3.11 is not an observed requirement. The README does not
   state whether other Python versions are supported.
-- The quick-start section contained an unresolved placeholder instead of the
-  net result, pending the captain's figures after 16:30.
+- The quick-start section still contains an unfinished result placeholder
+  pending the captain's final figure.
 - The single-run example reports net ARPU 676,992 and 20 pilots for an older
   `agent.py` v2. Current commit `c5339ad` gives 561,775 and 15 pilots on the
   same seed 42. The example identifies its old version, but a judge looking for

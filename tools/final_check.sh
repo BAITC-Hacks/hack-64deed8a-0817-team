@@ -28,7 +28,11 @@ step() {
         return 0
     fi
     echo "FAIL  $name  (log: $log)"
-    tail -n 5 "$log" | sed 's/^/      /'
+    if [ "$name" = "placeholders" ]; then
+        sed 's/^/      /' "$log"
+    else
+        tail -n 5 "$log" | sed 's/^/      /'
+    fi
     FAILED=1
     return 1
 }
@@ -48,6 +52,17 @@ else
     echo "FAIL  clone  (log: $LOGS/clone.log)"
     abort
 fi
+
+check_placeholders() {
+    if grep -nH -F -e 'цифра после финала' -e 'TODO' -e 'TBD' README.md docs/*.md; then
+        return 1
+    else
+        local rc=$?
+        [ "$rc" -eq 1 ]
+    fi
+}
+export -f check_placeholders
+step placeholders bash -c check_placeholders
 
 PY="$CLONE/.venv/bin/python"
 step venv python3 -m venv .venv || abort

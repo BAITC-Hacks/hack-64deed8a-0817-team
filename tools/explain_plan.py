@@ -126,7 +126,7 @@ def explain_pilots(agent, env, finals):
 
 def render(env, agent, pilots, finals, result):
     revision = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+        ["git", "log", "-1", "--format=%h", "--", "agent.py", "agent_core"], cwd=ROOT,
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     timestamp = datetime.now(ZoneInfo("Asia/Almaty")).strftime("%Y-%m-%d %H:%M")
