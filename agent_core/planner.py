@@ -75,7 +75,7 @@ class Planner:
     def qualifying(self):
         """Per cell: the confirmed target with LCB > 0 and the highest posterior mean."""
         best = {}
-        for cell, target in self._tested():
+        for cell, target in sorted(self._tested()):
             mean, sd = self.post.get(cell, target)
             if not self.post.confirmed_enough(cell, target) or mean - FINAL_K * sd <= 0:
                 continue
@@ -99,7 +99,7 @@ class Planner:
         money_left = self.env.total_budget - sum(p["cost"] for p in self.pilot_log)
 
         options = []
-        for cell, (target, mean) in self.qualifying().items():
+        for cell, (target, mean) in sorted(self.qualifying().items()):
             per_contact = _channel_options(mean, self.cells[cell]["arpu"], channels)
             best_pc = max(per_contact.values())
             if best_pc > 0:

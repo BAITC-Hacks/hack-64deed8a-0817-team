@@ -103,7 +103,7 @@ class Explorer:
 
     def _any_promising(self, tested):
         """Some arm with posterior mean > 0 AND pilot-only mean > 0."""
-        for tariff, segment, target in tested:
+        for tariff, segment, target in sorted(tested):
             cell = (tariff, segment)
             pilot = self.post.pilot_only(cell, target)
             if self.post.get(cell, target)[0] > 0 and pilot is not None and pilot[0] > 0:
@@ -113,7 +113,7 @@ class Explorer:
     def _open_leaders(self, tested):
         """Arms worth confirming, best first: mean > 0, not capped, not yet through the gate."""
         out = []
-        for tariff, segment, target in tested:
+        for tariff, segment, target in sorted(tested):
             cell = (tariff, segment)
             mean, sd = self.post.get(cell, target)
             if mean <= 0 or self.post.n_obs.get((cell, target), 0) >= MAX_PILOTS_PER_ARM:
@@ -146,7 +146,7 @@ class Explorer:
         return rows
 
     def run(self):
-        # Round 1: top candidates by prior UCB x cell value.
+        # Round 1: cells by value (size x mean ARPU), targets by prior mean / upsell price.
         for cell, target in self.candidates()[:ROUND1_PILOTS]:
             if not self._can_pilot(ROUND1_N):
                 break
@@ -169,6 +169,6 @@ class Explorer:
             _, cell, target = open_leaders[0]
             if self.pilot(cell, target, ROUND2_N) is None:
                 break
-            if ADAPTIVE_STOP and any(self._passes_gate((t, s), g) for t, s, g in tested):
+            if ADAPTIVE_STOP and any(self._passes_gate((t, s), g) for t, s, g in sorted(tested)):
                 break
         return self.log
