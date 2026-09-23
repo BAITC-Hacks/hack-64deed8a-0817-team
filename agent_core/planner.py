@@ -2,6 +2,7 @@
 
 MAX_PER_CAMPAIGN = 5000
 MAX_CAMPAIGNS = 10
+FINAL_K = 1.5  # final only if mean - FINAL_K * sd > 0
 
 
 def _channel_options(base_mean, arpu, channels):
@@ -29,11 +30,11 @@ class Planner:
                 for p in self.pilot_log}
 
     def qualifying(self):
-        """Per cell: the target with LCB > 0 and the highest posterior mean."""
+        """Per cell: the confirmed target with LCB > 0 and the highest posterior mean."""
         best = {}
         for cell, target in self._tested():
             mean, sd = self.post.get(cell, target)
-            if mean - sd <= 0:
+            if not self.post.confirmed_enough(cell, target) or mean - FINAL_K * sd <= 0:
                 continue
             if cell not in best or mean > best[cell][1]:
                 best[cell] = (target, mean)

@@ -15,6 +15,7 @@ class Posterior:
     def __init__(self):
         self._state = {}  # (cell, target) -> (mean, var)
         self.n_obs = {}   # (cell, target) -> pilots observed
+        self.n_total = {} # (cell, target) -> customers observed over all pilots
 
     def get(self, cell, target):
         key = (cell, target)
@@ -33,6 +34,7 @@ class Posterior:
         new_mean = new_var * (mean / (sd * sd) + obs / obs_var)
         self._state[(cell, target)] = (new_mean, new_var)
         self.n_obs[(cell, target)] = self.n_obs.get((cell, target), 0) + 1
+        self.n_total[(cell, target)] = self.n_total.get((cell, target), 0) + n
         return new_mean, math.sqrt(new_var)
 
     def lcb(self, cell, target, k=1.0):
@@ -42,3 +44,7 @@ class Posterior:
     def ucb(self, cell, target, k=1.0):
         mean, sd = self.get(cell, target)
         return mean + k * sd
+
+    def confirmed_enough(self, cell, target, min_pilots=2, min_n=300):
+        key = (cell, target)
+        return self.n_obs.get(key, 0) >= min_pilots or self.n_total.get(key, 0) >= min_n

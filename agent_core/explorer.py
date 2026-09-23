@@ -1,7 +1,10 @@
 """Pilot phase: pick single-cell sms pilots, feed results into the posterior."""
 
+from .planner import FINAL_K
+
 MIN_CELL_SIZE = 300
 ROUND1_PILOTS = 10
+ROUND1_PER_CELL = 2
 ROUND1_N = 150
 ROUND2_N = 200
 PILOT_CHANNEL = "sms"
@@ -15,18 +18,16 @@ class Explorer:
         self.log = []  # our own record of every pilot incl. filters
 
     def candidates(self):
+        """Round-1 arms: cells by value (size x mean ARPU), best targets by prior mean."""
         targets = list(self.env.tariffs["tariff_plan_code"])
+        big = [c for c, info in self.cells.items() if info["size"] >= MIN_CELL_SIZE]
+        big.sort(key=lambda c: self.cells[c]["size"] * self.cells[c]["arpu"], reverse=True)
         out = []
-        for cell, info in self.cells.items():
-            if info["size"] < MIN_CELL_SIZE:
-                continue
-            value = info["size"] * info["arpu"]
-            for target in targets:
-                if target == cell[0]:
-                    continue
-                out.append((self.post.ucb(cell, target) * value, cell, target))
-        out.sort(key=lambda x: x[0], reverse=True)
-        return [(cell, target) for _, cell, target in out]
+        for cell in big:
+            ranked = sorted((t for t in targets if t != cell[0]),
+                            key=lambda t: self.post.get(cell, t)[0], reverse=True)
+            out.extend((cell, t) for t in ranked[:ROUND1_PER_CELL])
+        return out
 
     def _can_pilot(self, n):
         cost = self.env.channels[PILOT_CHANNEL]["cost_per_contact"]
@@ -58,21 +59,23 @@ class Explorer:
                 break
             self.pilot(cell, target, ROUND1_N)
 
-        # Round 2: re-pilot close calls (mean > 0 but LCB < 0) while resources allow.
+        # Round 2: confirm round-1 leaders (mean > 0) until they pass or fail the final gate.
         tested = {(p["current_tariff"], p["arpu_segment"], p["target_tariff"]) for p in self.log}
         while self._can_pilot(ROUND2_N):
-            close = []
+            open_leaders = []
             for tariff, segment, target in tested:
                 cell = (tariff, segment)
                 mean, sd = self.post.get(cell, target)
-                if mean > 0 and mean - sd < 0:
-                    info = self.cells[cell]
-                    close.append((self.post.ucb(cell, target) * info["size"] * info["arpu"],
-                                  cell, target))
-            if not close:
+                if mean <= 0:
+                    continue
+                if self.post.confirmed_enough(cell, target) and mean - FINAL_K * sd > 0:
+                    continue
+                info = self.cells[cell]
+                open_leaders.append((mean * info["size"] * info["arpu"], cell, target))
+            if not open_leaders:
                 break
-            close.sort(key=lambda x: x[0], reverse=True)
-            _, cell, target = close[0]
+            open_leaders.sort(key=lambda x: x[0], reverse=True)
+            _, cell, target = open_leaders[0]
             if self.pilot(cell, target, ROUND2_N) is None:
                 break
         return self.log
