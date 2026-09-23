@@ -15,6 +15,11 @@ MAX_PILOTS_PER_ARM = 2  # screen + one confirmation; no re-piloting until lucky
 # kept 40/50 but did not improve the worst run (-227,816, lost in round-1 pilots).
 ADAPTIVE_STOP = False
 PILOT_CHANNEL = "sms"
+# The effect ratio depends only on the (tariff, arpu_segment) cell, so a pilot on any
+# data/call slice of the cell observes the same ratio. Pilot on the slice with the lowest
+# mean predicted ARPU (enough customers for n): same signal, smaller loss if negative.
+CHEAP_SLICE_PILOTS = True
+SLICE_COLUMNS = ("data_segment", "call_segment")
 
 
 class Explorer:
@@ -42,12 +47,26 @@ class Explorer:
         return (self.env.pilots_left > 0 and self.env.remaining_contacts >= 10
                 and self.env.remaining_budget >= cost * min(n, 10))
 
+    def _cheapest_slice(self, cell, n):
+        """{filter_<column>: value} of the lowest-mean-ARPU slice with >= n customers, or {}."""
+        profile = self.env.customer_profile
+        sub = profile[(profile["current_tariff"] == cell[0])
+                      & (profile["arpu_segment"] == cell[1])]
+        best = None
+        for column in SLICE_COLUMNS:
+            g = sub.groupby(column, observed=True)["predicted_arpu"].agg(["size", "mean"])
+            for value, row in g[g["size"] >= n].iterrows():
+                if best is None or row["mean"] < best[0]:
+                    best = (row["mean"], {f"filter_{column}": value})
+        return best[1] if best else {}
+
     def pilot(self, cell, target, n):
         tariff, segment = cell
+        slice_filter = self._cheapest_slice(cell, n) if CHEAP_SLICE_PILOTS else {}
         try:
             res = self.env.run_pilot(target_tariff=target, channel=PILOT_CHANNEL,
                                      n_customers=n, filter_current_tariff=tariff,
-                                     filter_arpu_segment=segment)
+                                     filter_arpu_segment=segment, **slice_filter)
         except (RuntimeError, ValueError):
             return None
         mult = self.env.channels[PILOT_CHANNEL]["conversion_multiplier"]
@@ -55,7 +74,7 @@ class Explorer:
                                     res["n_customers"], mult)
         self.log.append({
             "current_tariff": tariff, "arpu_segment": segment, "target_tariff": target,
-            "channel": PILOT_CHANNEL, "n": res["n_customers"], "cost": res["cost"],
+            "slice": slice_filter, "channel": PILOT_CHANNEL, "n": res["n_customers"], "cost": res["cost"],
             "observed_ratio": res["observed_lift_ratio"], "post_mean": mean, "post_sd": sd,
         })
         return res
