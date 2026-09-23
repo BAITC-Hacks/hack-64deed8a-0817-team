@@ -1,2 +1,4 @@
 campaign_name,filter_arpu_segment,filter_data_segment,filter_call_segment,filter_current_tariff,target_tariff,channel
-tariff_8_HIGH_to_tariff_10_digital_ads,HIGH,,,tariff_8,tariff_10,digital_ads
+tariff_8_MID_HIGH_to_tariff_10_call,MID,,HIGH,tariff_8,tariff_10,call
+tariff_8_MID_MEDIUM_to_tariff_10_digital_ads,MID,,MEDIUM,tariff_8,tariff_10,digital_ads
+tariff_8_MID_LOW_to_tariff_10_digital_ads,MID,,LOW,tariff_8,tariff_10,digital_ads

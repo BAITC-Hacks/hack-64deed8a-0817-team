@@ -1,6 +1,8 @@
 """Pilot phase: pick single-cell sms pilots, feed results into the posterior."""
 
+from .llm_advisor import arm_id
 from .planner import FINAL_K
+from .priors import get_prior
 
 MIN_CELL_SIZE = 300
 ROUND1_PILOTS = 10
@@ -12,10 +14,11 @@ PILOT_CHANNEL = "sms"
 
 
 class Explorer:
-    def __init__(self, env, cells, posterior):
+    def __init__(self, env, cells, posterior, advisor=None):
         self.env = env
         self.cells = cells
         self.post = posterior
+        self.advisor = advisor
         self.log = []  # our own record of every pilot incl. filters
 
     def candidates(self):
@@ -53,6 +56,41 @@ class Explorer:
         })
         return res
 
+    def _open_leaders(self, tested):
+        """Arms worth confirming, best first: mean > 0, not capped, not yet through the gate."""
+        out = []
+        for tariff, segment, target in tested:
+            cell = (tariff, segment)
+            mean, sd = self.post.get(cell, target)
+            if mean <= 0 or self.post.n_obs.get((cell, target), 0) >= MAX_PILOTS_PER_ARM:
+                continue
+            if self.post.confirmed_enough(cell, target) and mean - FINAL_K * sd > 0:
+                continue
+            info = self.cells[cell]
+            out.append((mean * info["size"] * info["arpu"], cell, target))
+        out.sort(key=lambda x: x[0], reverse=True)
+        return out
+
+    def posterior_table(self):
+        """Every piloted arm with prior, posterior and evidence, for the LLM advisor."""
+        rows = []
+        for cell, target in sorted({((p["current_tariff"], p["arpu_segment"]), p["target_tariff"])
+                                    for p in self.log}):
+            prior_mean, prior_sd = get_prior(cell, target)
+            mean, sd = self.post.get(cell, target)
+            rows.append({
+                "arm": arm_id(cell, target),
+                "cell_size": self.cells[cell]["size"], "cell_mean_arpu": round(self.cells[cell]["arpu"], 1),
+                "prior_mean": round(prior_mean, 4), "prior_sd": round(prior_sd, 4),
+                "base_mean": round(mean, 4), "base_sd": round(sd, 4),
+                "pilots": self.post.n_obs.get((cell, target), 0),
+                "customers": self.post.n_total.get((cell, target), 0),
+                "observed_ratios": [round(p["observed_ratio"], 4) for p in self.log
+                                    if (p["current_tariff"], p["arpu_segment"]) == cell
+                                    and p["target_tariff"] == target],
+            })
+        return rows
+
     def run(self):
         # Round 1: top candidates by prior UCB x cell value.
         for cell, target in self.candidates()[:ROUND1_PILOTS]:
@@ -62,20 +100,16 @@ class Explorer:
 
         # Round 2: confirm round-1 leaders (mean > 0) until they pass or fail the final gate.
         tested = {(p["current_tariff"], p["arpu_segment"], p["target_tariff"]) for p in self.log}
+        priority = {}
+        if self.advisor is not None and self.advisor.enabled:
+            ours = [(cell, target) for _, cell, target in self._open_leaders(tested)]
+            ranked = self.advisor.rank_confirmations(ours, self.posterior_table())
+            priority = {arm: i for i, arm in enumerate(ranked)}
         while self._can_pilot(ROUND2_N):
-            open_leaders = []
-            for tariff, segment, target in tested:
-                cell = (tariff, segment)
-                mean, sd = self.post.get(cell, target)
-                if mean <= 0 or self.post.n_obs.get((cell, target), 0) >= MAX_PILOTS_PER_ARM:
-                    continue
-                if self.post.confirmed_enough(cell, target) and mean - FINAL_K * sd > 0:
-                    continue
-                info = self.cells[cell]
-                open_leaders.append((mean * info["size"] * info["arpu"], cell, target))
+            open_leaders = self._open_leaders(tested)
             if not open_leaders:
                 break
-            open_leaders.sort(key=lambda x: x[0], reverse=True)
+            open_leaders.sort(key=lambda x: priority.get((x[1], x[2]), len(priority)))
             _, cell, target = open_leaders[0]
             if self.pilot(cell, target, ROUND2_N) is None:
                 break
