@@ -47,7 +47,7 @@ On the real file: 453 rows, prior mean median 0.003 (range −0.09…0.81), sd m
 ## Plugging it in
 
 The interface is `priors.set_prior_source(fn)`, where `fn(cell, target) -> (mean, sd)`.
-In `agent.py`, set the source before the `Posterior` is created:
+`agent.py` already sets this source before the `Posterior` is created:
 
 ```python
 from agent_core import priors_history
@@ -63,21 +63,29 @@ class Agent:
 
 `get_prior` reads the CSV once, on first call (~0.1 s).
 
-## Known interaction (not yet plugged in)
+## Known interaction (plugged in — a caveat)
 
-`python local_eval.py --runs 10` on the mock, from a scratch copy:
+`agent.py` uses `set_prior_source(priors_history.get_prior)`: the history prior
+is the current source; `weak_prior` below is only a reference for comparison.
+The numbers below are the previously recorded `python local_eval.py --runs 10`
+results on the mock, from a scratch copy with the earlier UCB-based candidate
+ranking. They are not measurements of the current agent:
 
 | prior | median | min | max | runs > 0 |
 |---|---|---|---|---|
-| `weak_prior` (current) | −75,435 | −362,354 | 67,988 | 3/10 |
-| `priors_history.get_prior` | −111,320 | −382,465 | −32,648 | 0/10 |
+| `weak_prior` (reference only) | −75,435 | −362,354 | 67,988 | 3/10 |
+| `priors_history.get_prior` (current source; historical results) | −111,320 | −382,465 | −32,648 | 0/10 |
 
-Cause: `Explorer.candidates` ranks by UCB. Seen combos in big HIGH cells mostly
+Cause in that comparison: `Explorer.candidates` ranked by UCB. Seen combos in big HIGH cells mostly
 have mean ≤ 0 and sd = 0.05, so their UCB is below the unseen `(0, 0.1)`. Pilots
 then go to targets that have no history. The prior itself is not wrong here. To
 fix it, either rank candidates in `explorer.py` by something other than the raw
 UCB, or lower `UNSEEN_SD` here. Tuning either one to the mock numbers is exactly
 what MECHANICS.md warns against, so it needs a team decision.
+
+The current `Explorer.candidates` already ranks cells by `size × arpu` and
+targets within each cell by prior mean, not UCB. The comparison above documents
+the interaction with the earlier ranking; further tuning remains a team decision.
 
 ## Tests
 
