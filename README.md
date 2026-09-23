@@ -26,11 +26,12 @@ environment.py        — механика пилотов: шум, лимиты,
         ▼
 agent.py  →  Agent.act(env)
         │
-        ├─ agent_core/cells.py     — сборка ячеек аудитории
-        ├─ agent_core/priors.py    — априорные оценки эффекта
-        ├─ agent_core/bayes.py     — байесовское обновление по пилотам
-        ├─ agent_core/explorer.py  — разведка: какие ячейки пилотировать
-        └─ agent_core/planner.py   — финальные кампании под лимиты
+        ├─ agent_core/cells.py           — сборка ячеек аудитории
+        ├─ agent_core/priors.py          — интерфейс априорного источника (pluggable)
+        ├─ agent_core/priors_history.py  — источник априорных оценок из data/change_tariff.csv
+        ├─ agent_core/bayes.py           — байесовское обновление по пилотам
+        ├─ agent_core/explorer.py        — разведка: какие ячейки пилотировать
+        └─ agent_core/planner.py         — финальные кампании под лимиты
         │
         ▼
 scoring_core.py        — скоринг (тот же код, что у судей)
@@ -46,8 +47,10 @@ scoring_core.py        — скоринг (тот же код, что у суд�
 - `data/`, `customer_profile.csv`, `feature_dictionary.csv`,
   `tariff_dictionary.csv` — данные от организаторов (аудитория, справочники).
 - `agent_template.py` — исходный шаблон организаторов, оставлен для сверки.
-- `tests/test_limits.py` — проверка must-have лимитов (раздел 4 ниже).
-- `docs/MECHANICS.md`, `docs/RUN.md` — заметки по механике и команды запуска.
+- `tests/test_limits.py` — проверка must-have лимитов; `tests/test_priors.py` —
+  тесты `agent_core/priors_history.py`.
+- `docs/MECHANICS.md`, `docs/RUN.md`, `docs/PRIORS.md`, `docs/AUDIT.md` —
+  заметки по механике, команды запуска, приоры и отчёт compliance-аудита.
 - `PARTICIPANT_GUIDE.md(.pdf)` — правила кейса от организаторов.
 
 ## 3. Технологии
@@ -107,10 +110,10 @@ LLM-советник с ключом из `os.environ["OPENAI_API_KEY"]`, но �
 3. Ожидаемый результат — блок с `Статус: PASS` или `FAIL`, чистым
    результатом (`net_arpu_gain`) и списком кампаний; строка
    `Пилотов проведено: N из 20` с `N > 0`. Пример реального вывода (seed 42,
-   23.09.2026):
+   23.09.2026, `agent.py` v2 — confirmation gate + history priors):
    ```
    Статус: PASS
-   ЧИСТЫЙ РЕЗУЛЬТАТ (net):                 60,265   (+0.040% к baseline)
+   ЧИСТЫЙ РЕЗУЛЬТАТ (net):                676,992   (+0.449% к baseline)
    Пилотов проведено: 20 из 20
    ```
    Конкретные числа не гарантированы на будущих запусках — механика
@@ -124,11 +127,14 @@ LLM-советник с ключом из `os.environ["OPENAI_API_KEY"]`, но �
 
 ## 9. Ограничения
 
-- `local_eval.py --runs 10` показывает нестабильный знак результата между
-  seed (на данный момент ≈3 из 10 прогонов в плюс) — ожидаемое поведение
-  байесовской стратегии на заглушечных мок-эффектах, но это честно записано
-  как текущее состояние, не как факт про судейство (`docs/MECHANICS.md`,
+- `local_eval.py --runs 10` на текущей версии агента даёт 10 из 10 прогонов в
+  плюс (проверено 23.09.2026, см. `docs/AUDIT.md`) — это про устойчивость на
+  мок-эффектах, не гарантия результата на судействе (`docs/MECHANICS.md`,
   раздел 5: мок ≠ реальная модель).
+- **`submission.csv` в репозитории сейчас НЕ совпадает** с тем, что выдаёт
+  `python make_submission.py` на текущем `agent.py` (должно быть по
+  must-have #5 из `PARTICIPANT_GUIDE.md`). Подробности и статус — в
+  `docs/AUDIT.md`, раздел 2.
 - LLM в контуре решений не используется (опционально по правилам кейса).
 - `tests/test_limits.py` проверяет только структурные must-have (лимиты,
   наличие пилотов, число кампаний) — не экономическое качество стратегии.
