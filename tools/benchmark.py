@@ -30,7 +30,7 @@ FILTER_COLUMNS = (
     "filter_arpu_segment", "filter_data_segment", "filter_call_segment",
     "filter_current_tariff", "explicit_ids",
 )
-POLICIES = ("template", "naive", "ours", "oracle")
+POLICIES = ("template", "naive", "ours", "v4", "v4_top1", "v4_top3", "oracle")
 SEEDS = range(10)
 
 
@@ -271,7 +271,10 @@ def main():
         for seed in SEEDS:
             effects = perturb_effects(base, variant, seed)
             for name, agent_type in (("template", TemplateAgent),
-                                     ("naive", NaiveAgent), ("ours", OurAgent)):
+                                     ("naive", NaiveAgent), ("ours", OurAgent),
+                                     ("v4", lambda: OurAgent(policy="v4")),
+                                     ("v4_top1", lambda: OurAgent(policy="v4", max_finals=1)),
+                                     ("v4_top3", lambda: OurAgent(policy="v4", max_finals=3))):
                 runs[name].append(evaluate_agent(agent_type(), seed, effects,
                                                  profile, tariffs, name))
             options = oracle_options(effects, profile, tariffs)

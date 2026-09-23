@@ -65,6 +65,7 @@ def test_errors_and_call_limit_fall_back():
 
 def test_temperature_rejected_once_then_default(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "stub")
+    monkeypatch.setenv("AGENT_USE_LLM", "1")
     sent = []
 
     def stub_post(body):

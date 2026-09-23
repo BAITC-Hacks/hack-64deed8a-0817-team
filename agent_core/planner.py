@@ -11,6 +11,67 @@ FINAL_K = 1.5  # final only if mean - FINAL_K * sd > 0
 # amplified a false positive (39/50 positive vs 40/50 without, same worst case).
 SPLIT_COLUMNS = ()
 
+# Legal filter values of the scorer (scoring_core.FILTER_VALUES), for schema-valid
+# campaigns that deliberately match nobody.
+SEGMENT_VALUES = {
+    "filter_arpu_segment": ("LOW", "MID", "HIGH"),
+    "filter_data_segment": ("NON_USER", "LITE", "HEAVY"),
+    "filter_call_segment": ("LOW", "MEDIUM", "HIGH"),
+}
+
+
+def _other_tariff(tariffs, tariff):
+    return next((t for t in tariffs if t != tariff), tariffs[0])
+
+
+def zero_customer_campaign(env):
+    """Schema-valid push campaign whose legal filters match no customer; None if impossible."""
+    profile = env.customer_profile
+    tariffs = list(env.tariffs["tariff_plan_code"])
+    keys = ["current_tariff", "arpu_segment", "data_segment", "call_segment"]
+    counts = profile.groupby(keys, observed=True).size() if len(profile) else None
+    for tariff in tariffs:
+        for arpu in SEGMENT_VALUES["filter_arpu_segment"]:
+            for data in SEGMENT_VALUES["filter_data_segment"]:
+                for call in SEGMENT_VALUES["filter_call_segment"]:
+                    if counts is None or counts.get((tariff, arpu, data, call), 0) == 0:
+                        return {
+                            "campaign_name": "no_contact_fallback",
+                            "filter_current_tariff": tariff,
+                            "filter_arpu_segment": arpu,
+                            "filter_data_segment": data,
+                            "filter_call_segment": call,
+                            "target_tariff": _other_tariff(tariffs, tariff),
+                            "channel": "push",
+                        }
+    return None
+
+
+def safety_campaign(env):
+    """One valid campaign that costs nothing: matches nobody if possible, else the
+    globally smallest slice on push. Never raises."""
+    try:
+        campaign = zero_customer_campaign(env)
+        if campaign is not None:
+            return campaign
+    except Exception:  # noqa: BLE001 - keep falling back
+        pass
+    tariffs = list(env.tariffs["tariff_plan_code"])
+    try:
+        profile = env.customer_profile
+        keys = ["current_tariff", "arpu_segment", "data_segment", "call_segment"]
+        tariff, arpu, data, call = profile.groupby(keys, observed=True).size().idxmin()
+        return {
+            "campaign_name": "smallest_slice_fallback",
+            "filter_current_tariff": tariff, "filter_arpu_segment": arpu,
+            "filter_data_segment": data, "filter_call_segment": call,
+            "target_tariff": _other_tariff(tariffs, tariff), "channel": "push",
+        }
+    except Exception:  # noqa: BLE001
+        return {"campaign_name": "safety_net", "filter_arpu_segment": "LOW",
+                "filter_data_segment": "NON_USER", "filter_call_segment": "HIGH",
+                "target_tariff": tariffs[0], "channel": "push"}
+
 
 def _channel_options(base_mean, arpu, channels):
     """Expected net per contact on every channel for a given base effect."""
@@ -83,6 +144,10 @@ class Planner:
                 best[cell] = (target, mean)
         return best
 
+    def _rank_value(self, cell, mean, best_pc):
+        """Allocation order of qualifying cells: best expected net per contact."""
+        return best_pc
+
     def _parts(self, cell, column):
         """Disjoint sub-segments of a cell ([whole cell] when column is None)."""
         profile = self.env.customer_profile
@@ -95,15 +160,15 @@ class Planner:
 
     def plan(self):
         channels = self.env.channels
-        reach_left = self.env.max_total_contacts - sum(p["n"] for p in self.pilot_log)
-        money_left = self.env.total_budget - sum(p["cost"] for p in self.pilot_log)
+        # public counters already include every pilot, also ones run before this act()
+        reach_left, money_left = self.env.remaining_contacts, self.env.remaining_budget
 
         options = []
         for cell, (target, mean) in sorted(self.qualifying().items()):
             per_contact = _channel_options(mean, self.cells[cell]["arpu"], channels)
             best_pc = max(per_contact.values())
             if best_pc > 0:
-                options.append((best_pc, cell, target, mean))
+                options.append((self._rank_value(cell, mean, best_pc), cell, target, mean))
         options.sort(key=lambda x: x[0], reverse=True)
 
         campaigns = []
@@ -150,23 +215,15 @@ class Planner:
                 float(g.sum()[(data, call)]))
 
     def _fallback(self):
-        """Nothing is confident: one push campaign on the smallest slice of one cell.
-
-        Best posterior mean if it is positive; otherwise the arm whose expected loss on
-        its smallest slice is closest to zero (a campaign is mandatory, a large loss is not).
-        """
+        """Nothing passed the gate. Best posterior mean > 0: push on the smallest slice of
+        that arm's cell. Otherwise (or nothing tested / empty audience): a schema-valid
+        campaign that contacts nobody, so the mandatory campaign costs nothing."""
         tested = sorted(self._tested())
-        if not tested:
-            cell = max(sorted(self.cells), key=lambda c: self.cells[c]["size"])
-            targets = [t for t in self.env.tariffs["tariff_plan_code"] if t != cell[0]]
-            tested = [(cell, targets[0])]
-        mult = self.env.channels["push"]["conversion_multiplier"]
-        best_mean = max(self.post.get(*ct)[0] for ct in tested)
-        if best_mean > 0:
-            cell, target = max(tested, key=lambda ct: self.post.get(*ct)[0])
-        else:
-            cell, target = max(tested, key=lambda ct: self.post.get(*ct)[0] * mult
-                               * self._smallest_slice(ct[0])[1])
+        if not self.cells or not tested:
+            return safety_campaign(self.env)
+        cell, target = max(tested, key=lambda ct: self.post.get(*ct)[0])
+        if self.post.get(cell, target)[0] <= 0:
+            return safety_campaign(self.env)
         filters, _ = self._smallest_slice(cell)
         return {
             "campaign_name": f"fallback_{cell[0]}_{cell[1]}_to_{target}_push",

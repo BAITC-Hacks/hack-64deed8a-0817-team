@@ -19,6 +19,7 @@ MODULES = (
     "planner",
     "llm_advisor",
     "explorer",
+    "v4",
 )
 AGENT_IMPORTS = (
     "from agent_core import priors_history\n",
@@ -26,8 +27,9 @@ AGENT_IMPORTS = (
     "from agent_core.cells import build_cells\n",
     "from agent_core.explorer import Explorer\n",
     "from agent_core.llm_advisor import LLMAdvisor\n",
-    "from agent_core.planner import Planner\n",
+    "from agent_core.planner import Planner, safety_campaign\n",
     "from agent_core.priors import set_prior_source\n",
+    "from agent_core.v4 import ExplorerV4, PlannerV4\n",
 )
 
 
@@ -57,6 +59,10 @@ def bundle() -> str:
                                   "def get_history_prior(cell, target):", name)
         elif name == "bayes":
             source = replace_once(source, "from .priors import get_prior\n", "", name)
+        elif name == "v4":
+            for line in ("from .explorer import ROUND1_N, ROUND2_N, Explorer\n",
+                         "from .planner import Planner, _best_assignment\n"):
+                source = replace_once(source, line, "", name)
         elif name == "explorer":
             for line in ("from .llm_advisor import arm_id\n", "from .planner import FINAL_K\n",
                          "from .priors import get_prior\n"):
