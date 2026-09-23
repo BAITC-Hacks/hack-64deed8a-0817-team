@@ -7,10 +7,13 @@ toward 0 and the sd is kept wide. Definitions: docs/PRIORS.md.
 Plug in:  set_prior_source(priors_history.get_prior)
 """
 
+import logging
 import math
 from pathlib import Path
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "change_tariff.csv"
 
@@ -31,12 +34,25 @@ def arpu_segment(arpu):
     return "HIGH"
 
 
-def load_table(path=DATA_PATH):
-    """{(from_tariff, arpu_segment, to_tariff): {n, mean, std, conv}}; {} if unreadable."""
-    try:
-        df = pd.read_csv(path, usecols=["AVG_ARPU_PREV_3M", "AVG_ARPU_NEXT_3M",
-                                        "tariff_plan_code_from", "tariff_plan_code_to"])
-    except (OSError, ValueError):
+def load_table(path=None):
+    """{(from_tariff, arpu_segment, to_tariff): {n, mean, std, conv}}; {} if unreadable.
+
+    Tries `path` (or the module-relative DATA_PATH), then data/ under the current
+    working directory. An empty table is logged loudly: without it every prior is
+    (0, 0.1) and the explorer falls back to price-based upsell targets.
+    """
+    candidates = [Path(path)] if path is not None else [DATA_PATH, Path.cwd() / "data" / "change_tariff.csv"]
+    df = None
+    for candidate in candidates:
+        try:
+            df = pd.read_csv(candidate, usecols=["AVG_ARPU_PREV_3M", "AVG_ARPU_NEXT_3M",
+                                                 "tariff_plan_code_from", "tariff_plan_code_to"])
+            break
+        except (OSError, ValueError):
+            continue
+    if df is None:
+        logger.warning("history prior unavailable: none of %s readable; using weak priors",
+                       [str(c) for c in candidates])
         return {}
 
     df = df[df["AVG_ARPU_PREV_3M"] >= MIN_PREV_ARPU].copy()

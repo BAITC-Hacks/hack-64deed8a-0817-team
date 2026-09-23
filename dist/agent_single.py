@@ -39,10 +39,13 @@ toward 0 and the sd is kept wide. Definitions: docs/PRIORS.md.
 Plug in:  set_prior_source(priors_history.get_prior)
 """
 
+import logging
 import math
 from pathlib import Path
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 DATA_PATH = Path(__file__).resolve().parent / "data" / "change_tariff.csv"
 
@@ -63,12 +66,25 @@ def arpu_segment(arpu):
     return "HIGH"
 
 
-def load_table(path=DATA_PATH):
-    """{(from_tariff, arpu_segment, to_tariff): {n, mean, std, conv}}; {} if unreadable."""
-    try:
-        df = pd.read_csv(path, usecols=["AVG_ARPU_PREV_3M", "AVG_ARPU_NEXT_3M",
-                                        "tariff_plan_code_from", "tariff_plan_code_to"])
-    except (OSError, ValueError):
+def load_table(path=None):
+    """{(from_tariff, arpu_segment, to_tariff): {n, mean, std, conv}}; {} if unreadable.
+
+    Tries `path` (or the module-relative DATA_PATH), then data/ under the current
+    working directory. An empty table is logged loudly: without it every prior is
+    (0, 0.1) and the explorer falls back to price-based upsell targets.
+    """
+    candidates = [Path(path)] if path is not None else [DATA_PATH, Path.cwd() / "data" / "change_tariff.csv"]
+    df = None
+    for candidate in candidates:
+        try:
+            df = pd.read_csv(candidate, usecols=["AVG_ARPU_PREV_3M", "AVG_ARPU_NEXT_3M",
+                                                 "tariff_plan_code_from", "tariff_plan_code_to"])
+            break
+        except (OSError, ValueError):
+            continue
+    if df is None:
+        logger.warning("history prior unavailable: none of %s readable; using weak priors",
+                       [str(c) for c in candidates])
         return {}
 
     df = df[df["AVG_ARPU_PREV_3M"] >= MIN_PREV_ARPU].copy()
@@ -591,15 +607,33 @@ class Explorer:
         self.advisor = advisor
         self.log = []  # our own record of every pilot incl. filters
 
+    def _upsell_targets(self, tariff):
+        """Targets priced above `tariff`, nearest first; [] if prices are unknown."""
+        if "price_tariff" not in self.env.tariffs.columns:
+            return []
+        price = dict(zip(self.env.tariffs["tariff_plan_code"], self.env.tariffs["price_tariff"]))
+        current = price.get(tariff)
+        if current is None:
+            return []
+        higher = [t for t, p in price.items() if p > current]
+        return sorted(higher, key=lambda t: (price[t] - current, t))
+
     def candidates(self):
-        """Round-1 arms: cells by value (size x mean ARPU), best targets by prior mean."""
+        """Round-1 arms: cells by value (size x mean ARPU); per cell the targets with a
+        positive prior mean, topped up with the nearest higher-priced tariffs (upsell) when
+        the prior has nothing positive to say (e.g. no history table)."""
         targets = list(self.env.tariffs["tariff_plan_code"])
         big = [c for c, info in self.cells.items() if info["size"] >= MIN_CELL_SIZE]
         big.sort(key=lambda c: self.cells[c]["size"] * self.cells[c]["arpu"], reverse=True)
         out = []
         for cell in big:
-            ranked = sorted((t for t in targets if t != cell[0]),
-                            key=lambda t: self.post.get(cell, t)[0], reverse=True)
+            positive = [t for t in targets if t != cell[0] and self.post.get(cell, t)[0] > 0]
+            ranked = sorted(positive, key=lambda t: self.post.get(cell, t)[0], reverse=True)
+            for t in self._upsell_targets(cell[0]):
+                if len(ranked) >= ROUND1_PER_CELL:
+                    break
+                if t not in ranked and self.post.get(cell, t)[0] >= 0:
+                    ranked.append(t)
             out.extend((cell, t) for t in ranked[:ROUND1_PER_CELL])
         return out
 

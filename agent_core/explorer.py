@@ -30,15 +30,33 @@ class Explorer:
         self.advisor = advisor
         self.log = []  # our own record of every pilot incl. filters
 
+    def _upsell_targets(self, tariff):
+        """Targets priced above `tariff`, nearest first; [] if prices are unknown."""
+        if "price_tariff" not in self.env.tariffs.columns:
+            return []
+        price = dict(zip(self.env.tariffs["tariff_plan_code"], self.env.tariffs["price_tariff"]))
+        current = price.get(tariff)
+        if current is None:
+            return []
+        higher = [t for t, p in price.items() if p > current]
+        return sorted(higher, key=lambda t: (price[t] - current, t))
+
     def candidates(self):
-        """Round-1 arms: cells by value (size x mean ARPU), best targets by prior mean."""
+        """Round-1 arms: cells by value (size x mean ARPU); per cell the targets with a
+        positive prior mean, topped up with the nearest higher-priced tariffs (upsell) when
+        the prior has nothing positive to say (e.g. no history table)."""
         targets = list(self.env.tariffs["tariff_plan_code"])
         big = [c for c, info in self.cells.items() if info["size"] >= MIN_CELL_SIZE]
         big.sort(key=lambda c: self.cells[c]["size"] * self.cells[c]["arpu"], reverse=True)
         out = []
         for cell in big:
-            ranked = sorted((t for t in targets if t != cell[0]),
-                            key=lambda t: self.post.get(cell, t)[0], reverse=True)
+            positive = [t for t in targets if t != cell[0] and self.post.get(cell, t)[0] > 0]
+            ranked = sorted(positive, key=lambda t: self.post.get(cell, t)[0], reverse=True)
+            for t in self._upsell_targets(cell[0]):
+                if len(ranked) >= ROUND1_PER_CELL:
+                    break
+                if t not in ranked and self.post.get(cell, t)[0] >= 0:
+                    ranked.append(t)
             out.extend((cell, t) for t in ranked[:ROUND1_PER_CELL])
         return out
 
