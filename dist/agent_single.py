@@ -894,13 +894,16 @@ expected total net, channel and size from the planner economics, no overlapping 
 V4_ROUND1_PILOTS = 10
 V4_RECHECK_ARMS = 3
 V4_RECHECK_PILOTS = 5
+# Never leave pilots unused: after the re-check, screen the next-best unexplored cells
+# (any cell that can host one pilot, i.e. >= ROUND1_N customers) with the remaining pilots.
+V4_SCREEN_LEFTOVER = True
 
 
 class ExplorerV4(Explorer):
-    def candidates(self):
+    def candidates(self, eligible=None):
         """One upsell target per cell (highest prior mean); cells by prior x size x ARPU."""
         scored = []
-        eligible = set(self._eligible_cells())
+        eligible = set(self._eligible_cells()) if eligible is None else set(eligible)
         for cell, info in sorted(self.cells.items()):
             if cell not in eligible:
                 continue
@@ -946,6 +949,16 @@ class ExplorerV4(Explorer):
             if self.pilot(cell, target, ROUND2_N) is None:
                 break
             rechecks += 1
+
+        if V4_SCREEN_LEFTOVER:
+            piloted = {(cell, target) for cell, target in first}
+            piloted_cells = {cell for cell, _ in piloted}
+            hostable = [c for c, info in self.cells.items()
+                        if info["size"] >= ROUND1_N and c not in piloted_cells]
+            for cell, target in self.candidates(eligible=hostable):
+                if not self._can_pilot(ROUND1_N):
+                    break
+                self.pilot(cell, target, ROUND1_N)
         return self.log
 
 
