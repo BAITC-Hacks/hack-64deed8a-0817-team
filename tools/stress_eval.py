@@ -26,6 +26,7 @@ from scoring_core import MAX_CAMPAIGNS, sanitize_campaigns, score_campaigns
 
 
 VARIANTS = (
+    "baseline",
     "arpu_x0.5",
     "arpu_x1.5",
     "row_random_0.5_to_1.5",
@@ -45,7 +46,9 @@ def perturb_effects(base: pd.DataFrame, variant: str, seed: int) -> pd.DataFrame
     """Return an independent impact table for one variant and seed."""
     effects = base.copy(deep=True)
     rng = np.random.default_rng(seed)
-    if variant == "arpu_x0.5":
+    if variant == "baseline":
+        pass
+    elif variant == "arpu_x0.5":
         effects["arpu_change_pct"] *= 0.5
     elif variant == "arpu_x1.5":
         effects["arpu_change_pct"] *= 1.5
