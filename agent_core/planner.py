@@ -136,24 +136,43 @@ class Planner:
             campaigns = [self._fallback()]
         return campaigns
 
-    def _fallback(self):
-        """Nothing is confident: one small push campaign on the best-posterior cell."""
-        tested = self._tested()
-        if tested:
-            cell, target = max(tested, key=lambda ct: self.post.get(*ct)[0])
-        else:
-            cell = max(self.cells, key=lambda c: self.cells[c]["size"])
-            targets = [t for t in self.env.tariffs["tariff_plan_code"] if t != cell[0]]
-            target = targets[0]
+    def _smallest_slice(self, cell):
+        """Smallest (data_segment, call_segment) slice of a cell: filters and its ARPU sum."""
         profile = self.env.customer_profile
         sub = profile[(profile["current_tariff"] == cell[0])
                       & (profile["arpu_segment"] == cell[1])]
-        smallest = sub["data_segment"].value_counts().idxmin() if len(sub) else None
+        if not len(sub):
+            return {}, 0.0
+        g = sub.groupby(["data_segment", "call_segment"], observed=True)["predicted_arpu"]
+        sizes = g.size()
+        data, call = sizes.idxmin()
+        return ({"filter_data_segment": data, "filter_call_segment": call},
+                float(g.sum()[(data, call)]))
+
+    def _fallback(self):
+        """Nothing is confident: one push campaign on the smallest slice of one cell.
+
+        Best posterior mean if it is positive; otherwise the arm whose expected loss on
+        its smallest slice is closest to zero (a campaign is mandatory, a large loss is not).
+        """
+        tested = sorted(self._tested())
+        if not tested:
+            cell = max(sorted(self.cells), key=lambda c: self.cells[c]["size"])
+            targets = [t for t in self.env.tariffs["tariff_plan_code"] if t != cell[0]]
+            tested = [(cell, targets[0])]
+        mult = self.env.channels["push"]["conversion_multiplier"]
+        best_mean = max(self.post.get(*ct)[0] for ct in tested)
+        if best_mean > 0:
+            cell, target = max(tested, key=lambda ct: self.post.get(*ct)[0])
+        else:
+            cell, target = max(tested, key=lambda ct: self.post.get(*ct)[0] * mult
+                               * self._smallest_slice(ct[0])[1])
+        filters, _ = self._smallest_slice(cell)
         return {
             "campaign_name": f"fallback_{cell[0]}_{cell[1]}_to_{target}_push",
             "filter_current_tariff": cell[0],
             "filter_arpu_segment": cell[1],
-            "filter_data_segment": smallest,
+            **filters,
             "target_tariff": target,
             "channel": "push",
         }
