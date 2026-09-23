@@ -5,6 +5,7 @@ from .planner import FINAL_K
 from .priors import get_prior
 
 MIN_CELL_SIZE = 300
+MIN_PILOT_CELL = 10  # admitted only when no cell reaches MIN_CELL_SIZE (env minimum pilot)
 ROUND1_PILOTS = 10
 ROUND1_PER_CELL = 2
 ROUND1_N = 150
@@ -46,7 +47,7 @@ class Explorer:
         positive prior mean, topped up with the nearest higher-priced tariffs (upsell) when
         the prior has nothing positive to say (e.g. no history table)."""
         targets = list(self.env.tariffs["tariff_plan_code"])
-        big = [c for c, info in self.cells.items() if info["size"] >= MIN_CELL_SIZE]
+        big = self._eligible_cells()
         big.sort(key=lambda c: self.cells[c]["size"] * self.cells[c]["arpu"], reverse=True)
         out = []
         for cell in big:
@@ -60,10 +61,25 @@ class Explorer:
             out.extend((cell, t) for t in ranked[:ROUND1_PER_CELL])
         return out
 
-    def _can_pilot(self, n):
+    def _eligible_cells(self):
+        """Cells big enough to pilot: >= MIN_CELL_SIZE, else (tiny audience) >= MIN_PILOT_CELL."""
+        big = [c for c, info in self.cells.items() if info["size"] >= MIN_CELL_SIZE]
+        if not big:
+            big = [c for c, info in self.cells.items() if info["size"] >= MIN_PILOT_CELL]
+        return big
+
+    def _pilot_channel(self):
+        """sms while a minimum pilot is affordable, otherwise the free channel if any."""
         cost = self.env.channels[PILOT_CHANNEL]["cost_per_contact"]
-        return (self.env.pilots_left > 0 and self.env.remaining_contacts >= 10
-                and self.env.remaining_budget >= cost * min(n, 10))
+        if self.env.remaining_budget >= cost * MIN_PILOT_CELL:
+            return PILOT_CHANNEL
+        free = [ch for ch, c in self.env.channels.items() if c["cost_per_contact"] == 0]
+        return free[0] if free else PILOT_CHANNEL
+
+    def _can_pilot(self, n):
+        cost = self.env.channels[self._pilot_channel()]["cost_per_contact"]
+        return (self.env.pilots_left > 0 and self.env.remaining_contacts >= MIN_PILOT_CELL
+                and self.env.remaining_budget >= cost * min(n, MIN_PILOT_CELL))
 
     def _cheapest_slice(self, cell, n):
         """{filter_<column>: value} of the lowest-mean-ARPU slice with >= n customers, or {}."""
@@ -80,19 +96,20 @@ class Explorer:
 
     def pilot(self, cell, target, n):
         tariff, segment = cell
+        channel = self._pilot_channel()
         slice_filter = self._cheapest_slice(cell, n) if CHEAP_SLICE_PILOTS else {}
         try:
-            res = self.env.run_pilot(target_tariff=target, channel=PILOT_CHANNEL,
+            res = self.env.run_pilot(target_tariff=target, channel=channel,
                                      n_customers=n, filter_current_tariff=tariff,
                                      filter_arpu_segment=segment, **slice_filter)
         except (RuntimeError, ValueError):
             return None
-        mult = self.env.channels[PILOT_CHANNEL]["conversion_multiplier"]
+        mult = self.env.channels[channel]["conversion_multiplier"]
         mean, sd = self.post.update(cell, target, res["observed_lift_ratio"],
                                     res["n_customers"], mult)
         self.log.append({
             "current_tariff": tariff, "arpu_segment": segment, "target_tariff": target,
-            "slice": slice_filter, "channel": PILOT_CHANNEL, "n": res["n_customers"], "cost": res["cost"],
+            "slice": slice_filter, "channel": channel, "n": res["n_customers"], "cost": res["cost"],
             "observed_ratio": res["observed_lift_ratio"], "post_mean": mean, "post_sd": sd,
         })
         return res

@@ -1,10 +1,12 @@
 """Optional LLM strategist with guardrails.
 
-Active only when OPENAI_API_KEY is set. The model sees our posterior table and may:
+Active only when AGENT_USE_LLM=1 and OPENAI_API_KEY are both set (a key alone does
+nothing, so a machine with a key still runs fully deterministically). The model sees our posterior table and may:
   * reorder which of OUR top-6 open arms get confirmed first (no new arms);
   * flag arms it finds suspicious (logged, passed to the final review);
   * remove final campaigns (never add or edit them, never remove all of them).
-Every call: temperature 0, JSON schema output, 20 s timeout, at most MAX_CALLS per run,
+Every call: temperature 0, JSON schema output, a hard 20 s wall-clock deadline covering
+the whole request and body read (the worker thread is abandoned on expiry), at most MAX_CALLS per run,
 and no new call once TIME_BUDGET_S seconds have been spent in calls in total.
 Models that only accept the default temperature (the API rejects 0 with
 param "temperature") are retried once without it; that choice is logged and kept.
@@ -15,6 +17,7 @@ Every decision (accepted, rejected or failed) is appended to self.log and logged
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -68,6 +71,26 @@ def _str_list(answer, key):
     return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
 
 
+def _call_with_deadline(fn, timeout):
+    """Run fn() in a daemon thread; give up (TimeoutError) after `timeout` seconds."""
+    outcome = {}
+
+    def worker():
+        try:
+            outcome["value"] = fn()
+        except BaseException as e:  # noqa: BLE001 - re-raised in the caller
+            outcome["error"] = e
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"LLM call exceeded {timeout}s wall clock; abandoned")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 class TemperatureUnsupported(Exception):
     """The model rejected temperature=0 (only its default is allowed)."""
 
@@ -109,7 +132,8 @@ def _http_body(messages, schema_name, schema, temperature):
 
 class LLMAdvisor:
     def __init__(self, transport=None, clock=time.monotonic):
-        self.enabled = bool(os.environ.get("OPENAI_API_KEY")) or transport is not None
+        self.enabled = transport is not None or (
+            os.environ.get("AGENT_USE_LLM") == "1" and bool(os.environ.get("OPENAI_API_KEY")))
         self._transport = transport or self._http_transport
         self._clock = clock
         self._temperature_zero = True
@@ -150,7 +174,8 @@ class LLMAdvisor:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
         started = self._clock()
         try:
-            answer = self._transport(messages, schema_name, schema)
+            answer = _call_with_deadline(
+                lambda: self._transport(messages, schema_name, schema), TIMEOUT_S)
             if not isinstance(answer, dict):
                 raise ValueError("answer is not a JSON object")
             return answer

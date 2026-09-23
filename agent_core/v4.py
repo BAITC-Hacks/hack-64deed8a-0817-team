@@ -7,7 +7,7 @@ Finals: every arm with pooled pilot estimate > 0 and posterior mean > 0, ranked 
 expected total net, channel and size from the planner economics, no overlapping segments.
 """
 
-from .explorer import MIN_CELL_SIZE, ROUND1_N, ROUND2_N, Explorer
+from .explorer import ROUND1_N, ROUND2_N, Explorer
 from .planner import Planner, _best_assignment
 
 V4_ROUND1_PILOTS = 10
@@ -19,8 +19,9 @@ class ExplorerV4(Explorer):
     def candidates(self):
         """One upsell target per cell (highest prior mean); cells by prior x size x ARPU."""
         scored = []
+        eligible = set(self._eligible_cells())
         for cell, info in sorted(self.cells.items()):
-            if info["size"] < MIN_CELL_SIZE:
+            if cell not in eligible:
                 continue
             upsell = self._upsell_targets(cell[0])
             if not upsell:
@@ -92,6 +93,5 @@ class PlannerV4(Planner):
 
     def _rank_value(self, cell, mean, _best_pc):
         """Expected total net of the whole cell alone, under the full post-pilot budget."""
-        reach = self.env.max_total_contacts - sum(p["n"] for p in self.pilot_log)
-        money = self.env.total_budget - sum(p["cost"] for p in self.pilot_log)
+        reach, money = self.env.remaining_contacts, self.env.remaining_budget
         return _best_assignment(self._parts(cell, None), mean, self.env.channels, reach, money)[0]
