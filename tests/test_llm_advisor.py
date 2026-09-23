@@ -6,7 +6,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from agent_core.llm_advisor import MAX_CALLS, LLMAdvisor, arm_id
+import agent_core.llm_advisor as llm_advisor
+from agent_core.llm_advisor import MAX_CALLS, LLMAdvisor, TemperatureUnsupported, arm_id
 
 ARMS = [(("tariff_8", "MID"), f"tariff_{i}") for i in range(1, 9)]  # 8 arms, top-6 open to reorder
 CAMPAIGNS = [{"campaign_name": "a"}, {"campaign_name": "b"}]
@@ -60,3 +61,22 @@ def test_errors_and_call_limit_fall_back():
         adv.review_finals(CAMPAIGNS, [])
     assert adv.review_finals(CAMPAIGNS, []) == CAMPAIGNS
     assert adv.calls == MAX_CALLS and adv.log[-1]["status"] == "skipped"
+
+
+def test_temperature_rejected_once_then_default(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "stub")
+    sent = []
+
+    def stub_post(body):
+        sent.append("temperature" in body)
+        if "temperature" in body:
+            raise TemperatureUnsupported("only default (1) supported")
+        return {"remove": [], "reason": "ok"}
+
+    monkeypatch.setattr(llm_advisor, "_post", stub_post)
+    adv = LLMAdvisor()
+    adv.review_finals(CAMPAIGNS, [])
+    adv.review_finals(CAMPAIGNS, [])
+    assert sent == [True, False, False]  # one retry, then temperature is no longer sent
+    assert adv.calls == 2
+    assert [e["status"] for e in adv.log] == ["temperature_default", "applied", "applied"]

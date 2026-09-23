@@ -5,6 +5,8 @@ Active only when OPENAI_API_KEY is set. The model sees our posterior table and m
   * flag arms it finds suspicious (logged, passed to the final review);
   * remove final campaigns (never add or edit them, never remove all of them).
 Every call: temperature 0, JSON schema output, 20 s timeout, at most MAX_CALLS per run.
+Models that only accept the default temperature (the API rejects 0 with
+param "temperature") are retried once without it; that choice is logged and kept.
 Any error, timeout or invalid answer -> our deterministic decision stands.
 Every decision (accepted, rejected or failed) is appended to self.log and logged.
 """
@@ -12,6 +14,7 @@ Every decision (accepted, rejected or failed) is appended to self.log and logged
 import json
 import logging
 import os
+import urllib.error
 import urllib.request
 
 logger = logging.getLogger(__name__)
@@ -62,15 +65,11 @@ def _str_list(answer, key):
     return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
 
 
-def _http_transport(messages, schema_name, schema):
-    """POST to the chat completions endpoint and return the parsed JSON answer."""
-    body = {
-        "model": os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL,
-        "temperature": 0,
-        "messages": messages,
-        "response_format": {"type": "json_schema",
-                            "json_schema": {"name": schema_name, "strict": True, "schema": schema}},
-    }
+class TemperatureUnsupported(Exception):
+    """The model rejected temperature=0 (only its default is allowed)."""
+
+
+def _post(body):
     base = (os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
     req = urllib.request.Request(
         f"{base}/chat/completions",
@@ -78,18 +77,53 @@ def _http_transport(messages, schema_name, schema):
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        try:
+            error = json.loads(detail).get("error") or {}
+        except ValueError:
+            error = {}
+        if e.code == 400 and error.get("param") == "temperature":
+            raise TemperatureUnsupported(error.get("message", "")) from e
+        raise RuntimeError(f"HTTP {e.code}: {error.get('message') or detail[:300]}") from e
     return json.loads(payload["choices"][0]["message"]["content"])
+
+
+def _http_body(messages, schema_name, schema, temperature):
+    body = {
+        "model": os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL,
+        "messages": messages,
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": schema_name, "strict": True, "schema": schema}},
+    }
+    if temperature:
+        body["temperature"] = 0
+    return body
 
 
 class LLMAdvisor:
     def __init__(self, transport=None):
         self.enabled = bool(os.environ.get("OPENAI_API_KEY")) or transport is not None
-        self._transport = transport or _http_transport
+        self._transport = transport or self._http_transport
+        self._temperature_zero = True
         self.calls = 0
         self.suspicious = []
         self.log = []
+
+    def _http_transport(self, messages, schema_name, schema):
+        """POST to chat completions; drop temperature=0 once if the model rejects it."""
+        try:
+            return _post(_http_body(messages, schema_name, schema, self._temperature_zero))
+        except TemperatureUnsupported as e:
+            if not self._temperature_zero:
+                raise
+            self._temperature_zero = False
+            self._record(schema_name, status="temperature_default",
+                         reason=f"model rejected temperature=0, using its default: {e}")
+            return _post(_http_body(messages, schema_name, schema, False))
 
     def _record(self, step, **entry):
         entry = {"step": step, **entry}
@@ -142,7 +176,11 @@ class LLMAdvisor:
         answer = self._ask("review_finals",
                            {"task": "Return names of final campaigns to REMOVE because their "
                                     "evidence looks unreliable; empty list keeps all.",
-                            "campaigns": campaigns, "suspicious_arms": self.suspicious,
+                            "campaigns": [{**c, "arm": arm_id((c.get("filter_current_tariff"),
+                                                                c.get("filter_arpu_segment")),
+                                                               c.get("target_tariff"))}
+                                          for c in campaigns],
+                            "suspicious_arms": self.suspicious,
                             "posterior_table": table},
                            "review_finals", REVIEW_SCHEMA)
         if answer is None:
