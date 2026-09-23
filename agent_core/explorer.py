@@ -7,6 +7,7 @@ ROUND1_PILOTS = 10
 ROUND1_PER_CELL = 2
 ROUND1_N = 150
 ROUND2_N = 200
+MAX_PILOTS_PER_ARM = 2  # screen + one confirmation; no re-piloting until lucky
 PILOT_CHANNEL = "sms"
 
 
@@ -66,7 +67,7 @@ class Explorer:
             for tariff, segment, target in tested:
                 cell = (tariff, segment)
                 mean, sd = self.post.get(cell, target)
-                if mean <= 0:
+                if mean <= 0 or self.post.n_obs.get((cell, target), 0) >= MAX_PILOTS_PER_ARM:
                     continue
                 if self.post.confirmed_enough(cell, target) and mean - FINAL_K * sd > 0:
                     continue
