@@ -4,7 +4,8 @@ Active only when OPENAI_API_KEY is set. The model sees our posterior table and m
   * reorder which of OUR top-6 open arms get confirmed first (no new arms);
   * flag arms it finds suspicious (logged, passed to the final review);
   * remove final campaigns (never add or edit them, never remove all of them).
-Every call: temperature 0, JSON schema output, 20 s timeout, at most MAX_CALLS per run.
+Every call: temperature 0, JSON schema output, 20 s timeout, at most MAX_CALLS per run,
+and no new call once TIME_BUDGET_S seconds have been spent in calls in total.
 Models that only accept the default temperature (the API rejects 0 with
 param "temperature") are retried once without it; that choice is logged and kept.
 Any error, timeout or invalid answer -> our deterministic decision stands.
@@ -14,6 +15,7 @@ Every decision (accepted, rejected or failed) is appended to self.log and logged
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -23,6 +25,7 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 TIMEOUT_S = 20
 MAX_CALLS = 3
+TIME_BUDGET_S = 90  # cumulative wall time in LLM calls per run; further calls are skipped
 TOP_K = 6
 
 SYSTEM_PROMPT = (
@@ -105,11 +108,13 @@ def _http_body(messages, schema_name, schema, temperature):
 
 
 class LLMAdvisor:
-    def __init__(self, transport=None):
+    def __init__(self, transport=None, clock=time.monotonic):
         self.enabled = bool(os.environ.get("OPENAI_API_KEY")) or transport is not None
         self._transport = transport or self._http_transport
+        self._clock = clock
         self._temperature_zero = True
         self.calls = 0
+        self.elapsed = 0.0
         self.suspicious = []
         self.log = []
 
@@ -136,9 +141,14 @@ class LLMAdvisor:
         if self.calls >= MAX_CALLS:
             self._record(step, status="skipped", reason="call limit reached")
             return None
+        if self.elapsed >= TIME_BUDGET_S:
+            self._record(step, status="skipped",
+                         reason=f"time budget spent: {self.elapsed:.1f}s >= {TIME_BUDGET_S}s")
+            return None
         self.calls += 1
         messages = [{"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        started = self._clock()
         try:
             answer = self._transport(messages, schema_name, schema)
             if not isinstance(answer, dict):
@@ -147,6 +157,8 @@ class LLMAdvisor:
         except Exception as e:  # network, timeout, HTTP error, bad JSON: fall back
             self._record(step, status="failed", error=f"{type(e).__name__}: {e}")
             return None
+        finally:
+            self.elapsed += self._clock() - started
 
     def rank_confirmations(self, arms, table):
         """arms: our open arms in our order. Returns the new order (only top-6 reordered)."""

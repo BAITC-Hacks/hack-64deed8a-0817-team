@@ -7,7 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 import agent_core.llm_advisor as llm_advisor
-from agent_core.llm_advisor import MAX_CALLS, LLMAdvisor, TemperatureUnsupported, arm_id
+from agent_core.llm_advisor import MAX_CALLS, TIME_BUDGET_S, LLMAdvisor, TemperatureUnsupported, arm_id
 
 ARMS = [(("tariff_8", "MID"), f"tariff_{i}") for i in range(1, 9)]  # 8 arms, top-6 open to reorder
 CAMPAIGNS = [{"campaign_name": "a"}, {"campaign_name": "b"}]
@@ -80,3 +80,20 @@ def test_temperature_rejected_once_then_default(monkeypatch):
     assert sent == [True, False, False]  # one retry, then temperature is no longer sent
     assert adv.calls == 2
     assert [e["status"] for e in adv.log] == ["temperature_default", "applied", "applied"]
+
+
+def test_time_budget_skips_further_calls():
+    now = [0.0]
+    transport_calls = []
+
+    def slow_transport(messages, schema_name, schema):
+        transport_calls.append(schema_name)
+        now[0] += TIME_BUDGET_S / 2 + 1  # each call eats just over half the budget
+        return {"remove": [], "reason": "ok"}
+
+    adv = LLMAdvisor(transport=slow_transport, clock=lambda: now[0])
+    adv.review_finals(CAMPAIGNS, [])
+    adv.review_finals(CAMPAIGNS, [])
+    assert adv.review_finals(CAMPAIGNS, []) == CAMPAIGNS  # third call skipped, list untouched
+    assert len(transport_calls) == 2 and adv.calls == 2
+    assert adv.log[-1]["status"] == "skipped" and "time budget" in adv.log[-1]["reason"]
