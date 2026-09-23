@@ -158,6 +158,7 @@ class Posterior:
         self._state = {}  # (cell, target) -> (mean, var)
         self.n_obs = {}   # (cell, target) -> pilots observed
         self.n_total = {} # (cell, target) -> customers observed over all pilots
+        self._pilot = {}  # (cell, target) -> (sum obs * precision, sum precision), prior ignored
 
     def get(self, cell, target):
         key = (cell, target)
@@ -177,6 +178,8 @@ class Posterior:
         self._state[(cell, target)] = (new_mean, new_var)
         self.n_obs[(cell, target)] = self.n_obs.get((cell, target), 0) + 1
         self.n_total[(cell, target)] = self.n_total.get((cell, target), 0) + n
+        wsum, psum = self._pilot.get((cell, target), (0.0, 0.0))
+        self._pilot[(cell, target)] = (wsum + obs / obs_var, psum + 1.0 / obs_var)
         return new_mean, math.sqrt(new_var)
 
     def lcb(self, cell, target, k=1.0):
@@ -191,12 +194,26 @@ class Posterior:
         key = (cell, target)
         return self.n_obs.get(key, 0) >= min_pilots or self.n_total.get(key, 0) >= min_n
 
+    def pilot_only(self, cell, target):
+        """Pooled pilot estimate of the base effect, prior ignored; None if never piloted."""
+        wsum, psum = self._pilot.get((cell, target), (0.0, 0.0))
+        if psum <= 0:
+            return None
+        return wsum / psum, math.sqrt(1.0 / psum)
+
 # --- agent_core/planner.py ---
 """Final campaigns: greedy allocation of confident-positive cells under reach/money caps."""
+
+from itertools import product
 
 MAX_PER_CAMPAIGN = 5000
 MAX_CAMPAIGNS = 10
 FINAL_K = 1.5  # final only if mean - FINAL_K * sd > 0
+
+
+# Sub-segment splits (("data_segment", "call_segment")) are off: on stress_eval they
+# amplified a false positive (39/50 positive vs 40/50 without, same worst case).
+SPLIT_COLUMNS = ()
 
 
 def _channel_options(base_mean, arpu, channels):
@@ -210,6 +227,42 @@ def _contacts(size, cost, reach_left, money_left):
     if cost > 0:
         n = min(n, int(money_left // cost))
     return max(n, 0)
+
+
+def _best_assignment(parts, base_mean, channels, reach_left, money_left):
+    """Pick a channel (or none) for every disjoint part; maximise expected total net.
+
+    parts: [(filters, arpu_cumsum)] with ARPU sorted by ID_NUMBER, because scoring
+    truncates each campaign to its lowest IDs. Parts are allocated in the order of
+    their net per contact, which is also the order they are returned in.
+    """
+    best = (0.0, [])
+    for choice in product([None] + list(channels), repeat=len(parts)):
+        reach, money = reach_left, money_left
+        picked = []
+        for (filters, cums), ch in zip(parts, choice):
+            if ch is None:
+                continue
+            c = channels[ch]
+            pc = base_mean * c["conversion_multiplier"] * cums[-1] / len(cums) - c["cost_per_contact"]
+            picked.append((pc, filters, cums, ch))
+        picked.sort(key=lambda x: x[0], reverse=True)
+        total, plan = 0.0, []
+        for _, filters, cums, ch in picked:
+            cost = channels[ch]["cost_per_contact"]
+            n = _contacts(len(cums), cost, reach, money)
+            if n <= 0:
+                continue
+            net = base_mean * channels[ch]["conversion_multiplier"] * cums[n - 1] - n * cost
+            if net <= 0:
+                continue
+            reach -= n
+            money -= n * cost
+            total += net
+            plan.append((filters, ch, n, net))
+        if total > best[0]:
+            best = (total, plan)
+    return best
 
 
 class Planner:
@@ -234,6 +287,16 @@ class Planner:
                 best[cell] = (target, mean)
         return best
 
+    def _parts(self, cell, column):
+        """Disjoint sub-segments of a cell ([whole cell] when column is None)."""
+        profile = self.env.customer_profile
+        sub = profile[(profile["current_tariff"] == cell[0])
+                      & (profile["arpu_segment"] == cell[1])].sort_values("ID_NUMBER")
+        groups = [({}, sub)] if column is None else [
+            ({f"filter_{column}": value}, g) for value, g in sub.groupby(column, observed=True)]
+        return [(filters, g["predicted_arpu"].cumsum().to_numpy())
+                for filters, g in groups if len(g)]
+
     def plan(self):
         channels = self.env.channels
         reach_left = self.env.max_total_contacts - sum(p["n"] for p in self.pilot_log)
@@ -244,41 +307,34 @@ class Planner:
             per_contact = _channel_options(mean, self.cells[cell]["arpu"], channels)
             best_pc = max(per_contact.values())
             if best_pc > 0:
-                options.append((best_pc, cell, target, per_contact))
+                options.append((best_pc, cell, target, mean))
         options.sort(key=lambda x: x[0], reverse=True)
 
         campaigns = []
-        for _, cell, target, per_contact in options:
+        for _, cell, target, mean in options:
             if len(campaigns) >= MAX_CAMPAIGNS or reach_left <= 0:
                 break
-            size = self.cells[cell]["size"]
-            # channel with the best expected total net given what is left
-            best = None
-            for ch, pc in per_contact.items():
-                if pc <= 0:
+            # whole cell vs disjoint splits; a split wins only if expected total net improves
+            best = (0.0, [])
+            for column in (None,) + SPLIT_COLUMNS:
+                parts = self._parts(cell, column)
+                if len(campaigns) + len(parts) > MAX_CAMPAIGNS:
                     continue
-                cost = channels[ch]["cost_per_contact"]
-                n = _contacts(size, cost, reach_left, money_left)
-                if n > 0 and (best is None or n * pc > best[0]):
-                    best = (n * pc, ch, n, pc)
-            if best is None:
-                continue
-            _, ch, n, pc = best
-            reach_left -= n
-            money_left -= n * channels[ch]["cost_per_contact"]
-            campaigns.append({
-                "campaign_name": f"{cell[0]}_{cell[1]}_to_{target}_{ch}",
-                "filter_current_tariff": cell[0],
-                "filter_arpu_segment": cell[1],
-                "target_tariff": target,
-                "channel": ch,
-                "_per_contact": pc,
-                "_contacts": n,
-            })
-
-        campaigns.sort(key=lambda c: c["_per_contact"], reverse=True)
-        for c in campaigns:
-            del c["_per_contact"], c["_contacts"]
+                cand = _best_assignment(parts, mean, channels, reach_left, money_left)
+                if cand[0] > best[0]:
+                    best = cand
+            for filters, ch, n, _ in best[1]:
+                reach_left -= n
+                money_left -= n * channels[ch]["cost_per_contact"]
+                suffix = "_".join(str(v) for v in filters.values())
+                campaigns.append({
+                    "campaign_name": "_".join(x for x in (cell[0], cell[1], suffix, "to", target, ch) if x),
+                    "filter_current_tariff": cell[0],
+                    "filter_arpu_segment": cell[1],
+                    **filters,
+                    "target_tariff": target,
+                    "channel": ch,
+                })
 
         if not campaigns:
             campaigns = [self._fallback()]
@@ -306,6 +362,205 @@ class Planner:
             "channel": "push",
         }
 
+# --- agent_core/llm_advisor.py ---
+"""Optional LLM strategist with guardrails.
+
+Active only when OPENAI_API_KEY is set. The model sees our posterior table and may:
+  * reorder which of OUR top-6 open arms get confirmed first (no new arms);
+  * flag arms it finds suspicious (logged, passed to the final review);
+  * remove final campaigns (never add or edit them, never remove all of them).
+Every call: temperature 0, JSON schema output, 20 s timeout, at most MAX_CALLS per run.
+Models that only accept the default temperature (the API rejects 0 with
+param "temperature") are retried once without it; that choice is logged and kept.
+Any error, timeout or invalid answer -> our deterministic decision stands.
+Every decision (accepted, rejected or failed) is appended to self.log and logged.
+"""
+
+import json
+import logging
+import os
+import urllib.error
+import urllib.request
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
+TIMEOUT_S = 20
+MAX_CALLS = 3
+TOP_K = 6
+
+SYSTEM_PROMPT = (
+    "You advise a telecom tariff-migration campaign agent. Each arm is "
+    "(current_tariff, arpu_segment) -> target_tariff. 'base_mean'/'base_sd' is our Bayesian "
+    "posterior of the relative ARPU effect at channel multiplier 1.0 (prior from history, "
+    "updated by noisy pilots, pilot noise sd = 0.804/sqrt(n)/multiplier). Large effects from a "
+    "single small pilot, or a posterior far from its prior, are typical winner's-curse signs. "
+    "Answer only with JSON matching the schema."
+)
+
+RANK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "order": {"type": "array", "items": {"type": "string"}},
+        "suspicious": {"type": "array", "items": {"type": "string"}},
+        "reason": {"type": "string"},
+    },
+    "required": ["order", "suspicious", "reason"],
+    "additionalProperties": False,
+}
+
+REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "remove": {"type": "array", "items": {"type": "string"}},
+        "reason": {"type": "string"},
+    },
+    "required": ["remove", "reason"],
+    "additionalProperties": False,
+}
+
+
+def arm_id(cell, target):
+    return f"{cell[0]}|{cell[1]}|{target}"
+
+
+def _str_list(answer, key):
+    value = answer.get(key)
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+
+class TemperatureUnsupported(Exception):
+    """The model rejected temperature=0 (only its default is allowed)."""
+
+
+def _post(body):
+    base = (os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+    req = urllib.request.Request(
+        f"{base}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        try:
+            error = json.loads(detail).get("error") or {}
+        except ValueError:
+            error = {}
+        if e.code == 400 and error.get("param") == "temperature":
+            raise TemperatureUnsupported(error.get("message", "")) from e
+        raise RuntimeError(f"HTTP {e.code}: {error.get('message') or detail[:300]}") from e
+    return json.loads(payload["choices"][0]["message"]["content"])
+
+
+def _http_body(messages, schema_name, schema, temperature):
+    body = {
+        "model": os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL,
+        "messages": messages,
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": schema_name, "strict": True, "schema": schema}},
+    }
+    if temperature:
+        body["temperature"] = 0
+    return body
+
+
+class LLMAdvisor:
+    def __init__(self, transport=None):
+        self.enabled = bool(os.environ.get("OPENAI_API_KEY")) or transport is not None
+        self._transport = transport or self._http_transport
+        self._temperature_zero = True
+        self.calls = 0
+        self.suspicious = []
+        self.log = []
+
+    def _http_transport(self, messages, schema_name, schema):
+        """POST to chat completions; drop temperature=0 once if the model rejects it."""
+        try:
+            return _post(_http_body(messages, schema_name, schema, self._temperature_zero))
+        except TemperatureUnsupported as e:
+            if not self._temperature_zero:
+                raise
+            self._temperature_zero = False
+            self._record(schema_name, status="temperature_default",
+                         reason=f"model rejected temperature=0, using its default: {e}")
+            return _post(_http_body(messages, schema_name, schema, False))
+
+    def _record(self, step, **entry):
+        entry = {"step": step, **entry}
+        self.log.append(entry)
+        logger.info("llm_advisor %s", json.dumps(entry, ensure_ascii=False, default=str))
+
+    def _ask(self, step, payload, schema_name, schema):
+        if not self.enabled:
+            return None
+        if self.calls >= MAX_CALLS:
+            self._record(step, status="skipped", reason="call limit reached")
+            return None
+        self.calls += 1
+        messages = [{"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        try:
+            answer = self._transport(messages, schema_name, schema)
+            if not isinstance(answer, dict):
+                raise ValueError("answer is not a JSON object")
+            return answer
+        except Exception as e:  # network, timeout, HTTP error, bad JSON: fall back
+            self._record(step, status="failed", error=f"{type(e).__name__}: {e}")
+            return None
+
+    def rank_confirmations(self, arms, table):
+        """arms: our open arms in our order. Returns the new order (only top-6 reordered)."""
+        top = arms[:TOP_K]
+        ids = [arm_id(c, t) for c, t in top]
+        answer = self._ask("rank_confirmations",
+                           {"task": "Order these arm ids by which to confirm first with a "
+                                    "200-customer pilot; flag suspicious arm ids.",
+                            "candidates": ids, "posterior_table": table},
+                           "rank_confirmations", RANK_SCHEMA)
+        if answer is None:
+            return arms
+        order = _str_list(answer, "order")
+        suspicious = _str_list(answer, "suspicious")
+        valid = [i for i in dict.fromkeys(order) if i in ids]  # only our top-6, no duplicates
+        valid += [i for i in ids if i not in valid]            # nothing may be dropped
+        by_id = dict(zip(ids, top))
+        self.suspicious = suspicious
+        self._record("rank_confirmations", status="applied", ours=ids, llm=order,
+                     applied=valid, ignored=[i for i in order if i not in ids],
+                     suspicious=self.suspicious, reason=answer.get("reason"))
+        return [by_id[i] for i in valid] + arms[TOP_K:]
+
+    def review_finals(self, campaigns, table):
+        """May only remove campaigns by name; never adds, edits, or empties the list."""
+        names = [c["campaign_name"] for c in campaigns]
+        answer = self._ask("review_finals",
+                           {"task": "Return names of final campaigns to REMOVE because their "
+                                    "evidence looks unreliable; empty list keeps all.",
+                            "campaigns": [{**c, "arm": arm_id((c.get("filter_current_tariff"),
+                                                                c.get("filter_arpu_segment")),
+                                                               c.get("target_tariff"))}
+                                          for c in campaigns],
+                            "suspicious_arms": self.suspicious,
+                            "posterior_table": table},
+                           "review_finals", REVIEW_SCHEMA)
+        if answer is None:
+            return campaigns
+        remove = _str_list(answer, "remove")
+        drop = {n for n in remove if n in names}
+        if drop and len(drop) == len(names):
+            self._record("review_finals", status="rejected", llm=remove,
+                         reason="would remove every campaign", llm_reason=answer.get("reason"))
+            return campaigns
+        kept = [c for c in campaigns if c["campaign_name"] not in drop]
+        self._record("review_finals", status="applied", llm=remove, removed=sorted(drop),
+                     ignored=[n for n in remove if n not in names], reason=answer.get("reason"))
+        return kept
+
 # --- agent_core/explorer.py ---
 """Pilot phase: pick single-cell sms pilots, feed results into the posterior."""
 
@@ -315,14 +570,20 @@ ROUND1_PILOTS = 10
 ROUND1_PER_CELL = 2
 ROUND1_N = 150
 ROUND2_N = 200
+MAX_PILOTS_PER_ARM = 2  # screen + one confirmation; no re-piloting until lucky
+# Adaptive stop: skip round 2 when no arm looks positive on both posterior and pilots
+# alone; end round 2 as soon as one arm passes the launch gate. Off: on stress_eval it
+# kept 40/50 but did not improve the worst run (-227,816, lost in round-1 pilots).
+ADAPTIVE_STOP = False
 PILOT_CHANNEL = "sms"
 
 
 class Explorer:
-    def __init__(self, env, cells, posterior):
+    def __init__(self, env, cells, posterior, advisor=None):
         self.env = env
         self.cells = cells
         self.post = posterior
+        self.advisor = advisor
         self.log = []  # our own record of every pilot incl. filters
 
     def candidates(self):
@@ -360,6 +621,54 @@ class Explorer:
         })
         return res
 
+    def _passes_gate(self, cell, target):
+        mean, sd = self.post.get(cell, target)
+        return self.post.confirmed_enough(cell, target) and mean - FINAL_K * sd > 0
+
+    def _any_promising(self, tested):
+        """Some arm with posterior mean > 0 AND pilot-only mean > 0."""
+        for tariff, segment, target in tested:
+            cell = (tariff, segment)
+            pilot = self.post.pilot_only(cell, target)
+            if self.post.get(cell, target)[0] > 0 and pilot is not None and pilot[0] > 0:
+                return True
+        return False
+
+    def _open_leaders(self, tested):
+        """Arms worth confirming, best first: mean > 0, not capped, not yet through the gate."""
+        out = []
+        for tariff, segment, target in tested:
+            cell = (tariff, segment)
+            mean, sd = self.post.get(cell, target)
+            if mean <= 0 or self.post.n_obs.get((cell, target), 0) >= MAX_PILOTS_PER_ARM:
+                continue
+            if self._passes_gate(cell, target):
+                continue
+            info = self.cells[cell]
+            out.append((mean * info["size"] * info["arpu"], cell, target))
+        out.sort(key=lambda x: x[0], reverse=True)
+        return out
+
+    def posterior_table(self):
+        """Every piloted arm with prior, posterior and evidence, for the LLM advisor."""
+        rows = []
+        for cell, target in sorted({((p["current_tariff"], p["arpu_segment"]), p["target_tariff"])
+                                    for p in self.log}):
+            prior_mean, prior_sd = get_prior(cell, target)
+            mean, sd = self.post.get(cell, target)
+            rows.append({
+                "arm": arm_id(cell, target),
+                "cell_size": self.cells[cell]["size"], "cell_mean_arpu": round(self.cells[cell]["arpu"], 1),
+                "prior_mean": round(prior_mean, 4), "prior_sd": round(prior_sd, 4),
+                "base_mean": round(mean, 4), "base_sd": round(sd, 4),
+                "pilots": self.post.n_obs.get((cell, target), 0),
+                "customers": self.post.n_total.get((cell, target), 0),
+                "observed_ratios": [round(p["observed_ratio"], 4) for p in self.log
+                                    if (p["current_tariff"], p["arpu_segment"]) == cell
+                                    and p["target_tariff"] == target],
+            })
+        return rows
+
     def run(self):
         # Round 1: top candidates by prior UCB x cell value.
         for cell, target in self.candidates()[:ROUND1_PILOTS]:
@@ -369,22 +678,22 @@ class Explorer:
 
         # Round 2: confirm round-1 leaders (mean > 0) until they pass or fail the final gate.
         tested = {(p["current_tariff"], p["arpu_segment"], p["target_tariff"]) for p in self.log}
+        if ADAPTIVE_STOP and not self._any_promising(tested):
+            return self.log
+        priority = {}
+        if self.advisor is not None and self.advisor.enabled:
+            ours = [(cell, target) for _, cell, target in self._open_leaders(tested)]
+            ranked = self.advisor.rank_confirmations(ours, self.posterior_table())
+            priority = {arm: i for i, arm in enumerate(ranked)}
         while self._can_pilot(ROUND2_N):
-            open_leaders = []
-            for tariff, segment, target in tested:
-                cell = (tariff, segment)
-                mean, sd = self.post.get(cell, target)
-                if mean <= 0:
-                    continue
-                if self.post.confirmed_enough(cell, target) and mean - FINAL_K * sd > 0:
-                    continue
-                info = self.cells[cell]
-                open_leaders.append((mean * info["size"] * info["arpu"], cell, target))
+            open_leaders = self._open_leaders(tested)
             if not open_leaders:
                 break
-            open_leaders.sort(key=lambda x: x[0], reverse=True)
+            open_leaders.sort(key=lambda x: priority.get((x[1], x[2]), len(priority)))
             _, cell, target = open_leaders[0]
             if self.pilot(cell, target, ROUND2_N) is None:
+                break
+            if ADAPTIVE_STOP and any(self._passes_gate((t, s), g) for t, s, g in tested):
                 break
         return self.log
 
@@ -398,7 +707,11 @@ class Agent:
         set_prior_source(get_history_prior)
         cells = build_cells(env.customer_profile)
         post = Posterior()
-        explorer = Explorer(env, cells, post)
+        self.advisor = LLMAdvisor()  # inactive without OPENAI_API_KEY
+        explorer = Explorer(env, cells, post, advisor=self.advisor)
         pilot_log = explorer.run()
         self.pilot_log = pilot_log
-        return Planner(env, cells, post, pilot_log).plan()
+        campaigns = Planner(env, cells, post, pilot_log).plan()
+        if self.advisor.enabled:
+            campaigns = self.advisor.review_finals(campaigns, explorer.posterior_table())
+        return campaigns

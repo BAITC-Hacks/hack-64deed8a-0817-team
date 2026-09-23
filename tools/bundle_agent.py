@@ -17,6 +17,7 @@ MODULES = (
     "cells",
     "bayes",
     "planner",
+    "llm_advisor",
     "explorer",
 )
 AGENT_IMPORTS = (
@@ -24,6 +25,7 @@ AGENT_IMPORTS = (
     "from agent_core.bayes import Posterior\n",
     "from agent_core.cells import build_cells\n",
     "from agent_core.explorer import Explorer\n",
+    "from agent_core.llm_advisor import LLMAdvisor\n",
     "from agent_core.planner import Planner\n",
     "from agent_core.priors import set_prior_source\n",
 )
@@ -56,7 +58,9 @@ def bundle() -> str:
         elif name == "bayes":
             source = replace_once(source, "from .priors import get_prior\n", "", name)
         elif name == "explorer":
-            source = replace_once(source, "from .planner import FINAL_K\n", "", name)
+            for line in ("from .llm_advisor import arm_id\n", "from .planner import FINAL_K\n",
+                         "from .priors import get_prior\n"):
+                source = replace_once(source, line, "", name)
         ast.parse(source, filename=str(path))
         sections.append(f"# --- agent_core/{name}.py ---\n{source.rstrip()}")
 
