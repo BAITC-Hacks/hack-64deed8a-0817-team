@@ -1,12 +1,13 @@
 # Запуск
 
-Проверено на этой машине 23.09.2026: Python 3.11.14, pandas 3.0.6, numpy 2.4.6.
+Проверено 23.09.2026: pandas 3.0.6, numpy 2.4.6, pytest 9.1.1. Разработка: Python 3.12.3
+(Linux); чистая проверка: Python 3.13.9 (macOS arm64, docs/JUDGE_CHECK.md).
 Все команды — из корня репозитория.
 
 ## Установка
 
 ```bash
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -21,7 +22,7 @@ python local_eval.py --runs 10    # 10 прогонов с разными seed �
 ## Тесты
 
 ```bash
-python -m pytest tests/ -v   # все тесты, в т.ч. tests/test_priors.py
+python -m pytest tests/ -v   # 31 тест: лимиты, приоры, без истории, hardening, LLM-гардрейлы, актуальность сборки
 ```
 
 ## Сборка submission.csv
@@ -34,10 +35,10 @@ python make_submission.py
 
 ## Известное поведение агента (не баг)
 
-Обновлено 23.09.2026 после аудита (docs/AUDIT.md) на текущей версии `agent.py`
-(v2: confirmation gate, per-cell diversification, history priors):
-`local_eval.py --runs 10` даёт 10 из 10 прогонов в плюс (медиана ≈575k,
-минимум ≈60k). Механика (лимиты/бюджет/дедуп) отрабатывает идентично
+На замороженном коде `f11ae2d` (policy v4): `local_eval.py` на seed 42 даёт
+3 170 330 (20 пилотов, 10 финальных кампаний); `local_eval.py --runs 10` — 10 из 10
+прогонов в плюс (медиана 3 541 278, минимум 1 759 226); `tools/stress_eval.py` —
+60 из 60 в плюс, худший прогон +604 754 (docs/ROBUSTNESS.md, docs/BENCHMARK.md). Механика (лимиты/бюджет/дедуп) отрабатывает идентично
 судейству, но сами эффекты в мок-среде — заглушка (docs/MECHANICS.md,
 раздел 5), поэтому конкретные числа здесь ничего не говорят о результате на
 судействе — смотреть на устойчивость знака, а не на величину.
