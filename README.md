@@ -261,6 +261,6 @@ python make_submission.py
 
 | Группа | Файлы и каталоги |
 |---|---|
-| Наш код | `agent.py`; `agent_core/` (`bayes.py`, `cells.py`, `explorer.py`, `llm_advisor.py`, `planner.py`, `priors.py`, `priors_history.py`, `__init__.py`); `tests/` (`test_limits.py`, `test_llm_advisor.py`, `test_priors.py`); `tools/` (`bundle_agent.py`, `stress_eval.py`); `docs/` (`ARCHITECTURE.md`, `AUDIT.md`, `MECHANICS.md`, `PRIORS.md`, `ROBUSTNESS.md`, `RUN.md`) |
+| Наш код | `agent.py`; `agent_core/` (`bayes.py`, `cells.py`, `explorer.py`, `llm_advisor.py`, `planner.py`, `priors.py`, `priors_history.py`, `__init__.py`); `tests/` (`test_limits.py`, `test_llm_advisor.py`, `test_priors.py`); `tools/` (`bundle_agent.py`, `final_check.sh`, `scale_test.py`, `stress_eval.py`); `docs/` (`ARCHITECTURE.md`, `AUDIT.md`, `MECHANICS.md`, `PRIORS.md`, `ROBUSTNESS.md`, `RUN.md`, `SCALE.md`) |
 | Наш код — сборка для сдачи | `dist/agent_single.py` |
 | Материалы организаторов — не изменялись | `environment.py`, `scoring_core.py`, `mock_environment.py`, `local_eval.py`, `make_submission.py`, `agent_template.py`; `data/` (`arpu_monthly.csv`, `change_tariff.csv`, `dict_tariff.csv`, `traffic.csv`); `customer_profile.csv`, `feature_dictionary.csv`, `tariff_dictionary.csv`; `PARTICIPANT_GUIDE.md`, `PARTICIPANT_GUIDE.pdf` |
