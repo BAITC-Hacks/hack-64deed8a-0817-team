@@ -75,7 +75,6 @@ scoring_core.py        — скоринг (тот же код, что у суд�
 Файлы:
 
 - `agent.py`, `agent_core/` — наш агент.
-- `agent_core/planner.py` — финальные кампании под лимиты.
 - `agent_core/llm_advisor.py` — опциональный LLM-советник с гардрейлами;
   получает posterior и ограниченно влияет на порядок подтверждения и состав
   финального списка (см. [архитектуру](docs/ARCHITECTURE.md#llm_advisorpy)).
