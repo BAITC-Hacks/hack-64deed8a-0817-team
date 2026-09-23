@@ -16,6 +16,7 @@ class Posterior:
         self._state = {}  # (cell, target) -> (mean, var)
         self.n_obs = {}   # (cell, target) -> pilots observed
         self.n_total = {} # (cell, target) -> customers observed over all pilots
+        self._pilot = {}  # (cell, target) -> (sum obs * precision, sum precision), prior ignored
 
     def get(self, cell, target):
         key = (cell, target)
@@ -35,6 +36,8 @@ class Posterior:
         self._state[(cell, target)] = (new_mean, new_var)
         self.n_obs[(cell, target)] = self.n_obs.get((cell, target), 0) + 1
         self.n_total[(cell, target)] = self.n_total.get((cell, target), 0) + n
+        wsum, psum = self._pilot.get((cell, target), (0.0, 0.0))
+        self._pilot[(cell, target)] = (wsum + obs / obs_var, psum + 1.0 / obs_var)
         return new_mean, math.sqrt(new_var)
 
     def lcb(self, cell, target, k=1.0):
@@ -48,3 +51,10 @@ class Posterior:
     def confirmed_enough(self, cell, target, min_pilots=2, min_n=300):
         key = (cell, target)
         return self.n_obs.get(key, 0) >= min_pilots or self.n_total.get(key, 0) >= min_n
+
+    def pilot_only(self, cell, target):
+        """Pooled pilot estimate of the base effect, prior ignored; None if never piloted."""
+        wsum, psum = self._pilot.get((cell, target), (0.0, 0.0))
+        if psum <= 0:
+            return None
+        return wsum / psum, math.sqrt(1.0 / psum)

@@ -10,6 +10,10 @@ ROUND1_PER_CELL = 2
 ROUND1_N = 150
 ROUND2_N = 200
 MAX_PILOTS_PER_ARM = 2  # screen + one confirmation; no re-piloting until lucky
+# Adaptive stop: skip round 2 when no arm looks positive on both posterior and pilots
+# alone; end round 2 as soon as one arm passes the launch gate. Off: on stress_eval it
+# kept 40/50 but did not improve the worst run (-227,816, lost in round-1 pilots).
+ADAPTIVE_STOP = False
 PILOT_CHANNEL = "sms"
 
 
@@ -56,6 +60,19 @@ class Explorer:
         })
         return res
 
+    def _passes_gate(self, cell, target):
+        mean, sd = self.post.get(cell, target)
+        return self.post.confirmed_enough(cell, target) and mean - FINAL_K * sd > 0
+
+    def _any_promising(self, tested):
+        """Some arm with posterior mean > 0 AND pilot-only mean > 0."""
+        for tariff, segment, target in tested:
+            cell = (tariff, segment)
+            pilot = self.post.pilot_only(cell, target)
+            if self.post.get(cell, target)[0] > 0 and pilot is not None and pilot[0] > 0:
+                return True
+        return False
+
     def _open_leaders(self, tested):
         """Arms worth confirming, best first: mean > 0, not capped, not yet through the gate."""
         out = []
@@ -64,7 +81,7 @@ class Explorer:
             mean, sd = self.post.get(cell, target)
             if mean <= 0 or self.post.n_obs.get((cell, target), 0) >= MAX_PILOTS_PER_ARM:
                 continue
-            if self.post.confirmed_enough(cell, target) and mean - FINAL_K * sd > 0:
+            if self._passes_gate(cell, target):
                 continue
             info = self.cells[cell]
             out.append((mean * info["size"] * info["arpu"], cell, target))
@@ -100,6 +117,8 @@ class Explorer:
 
         # Round 2: confirm round-1 leaders (mean > 0) until they pass or fail the final gate.
         tested = {(p["current_tariff"], p["arpu_segment"], p["target_tariff"]) for p in self.log}
+        if ADAPTIVE_STOP and not self._any_promising(tested):
+            return self.log
         priority = {}
         if self.advisor is not None and self.advisor.enabled:
             ours = [(cell, target) for _, cell, target in self._open_leaders(tested)]
@@ -112,5 +131,7 @@ class Explorer:
             open_leaders.sort(key=lambda x: priority.get((x[1], x[2]), len(priority)))
             _, cell, target = open_leaders[0]
             if self.pilot(cell, target, ROUND2_N) is None:
+                break
+            if ADAPTIVE_STOP and any(self._passes_gate((t, s), g) for t, s, g in tested):
                 break
         return self.log
