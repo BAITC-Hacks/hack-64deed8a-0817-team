@@ -90,12 +90,23 @@ LLM-советник ограничен уже сформированными р
 Цикл агента от истории переходов до плана кампаний:
 
 ```mermaid
-flowchart LR
-    A[История → priors] --> B[Пилоты]
-    B --> C[Байесовское обновление]
-    C --> D[Planner]
-    D --> E[План кампаний]
-    L[LLM-советник: veto,<br/>выключен по умолчанию] -.->|может убрать кампании| E
+flowchart TD
+    A[Agent.act(env)] --> B[safety net: try/except вокруг _act]
+    B --> C[Подключить priors_history.get_prior]
+    C --> D[build_cells: ячейки tariff × arpu_segment]
+    D --> E[ExplorerV4.candidates: одна upsell-цель на ячейку, ранг prior × size × ARPU]
+    E --> F[Раунд 1: топ-10 ячеек, sms n=150, самый дешёвый срез]
+    F --> G[Подтверждение: топ-3 по наблюдённому ratio, n=200, до 5 пилотов]
+    G --> H[Остаток пилотов: скрининг следующих неисследованных ячеек, n=150]
+    H --> I[PlannerV4.qualifying: pooled pilot > 0 и posterior mean > 0]
+    I --> J[Канал и размер по экономике планировщика; лимиты reach/money/5000/10]
+    J --> K{Есть кампании?}
+    K -->|да| L[Вернуть до 10 кампаний, по одной на ячейку]
+    K -->|нет| M[Fallback: кампания, не задевающая никого]
+    L --> N{AGENT_USE_LLM=1 и ключ?}
+    M --> N
+    N -->|да| O[review_finals: может только удалить]
+    N -->|нет| P[Вернуть список]
 ```
 
 ```
@@ -150,11 +161,25 @@ scoring_core.py        — скоринг (тот же код, что у суд�
   `JUDGE_CHECK.md`, `AUDIT.md`.
 - `PARTICIPANT_GUIDE.md(.pdf)` — правила кейса от организаторов.
 
+### Опциональные пункты ТЗ (§8)
+
+| Пункт ТЗ §8 | Где реализовано | Подтверждение |
+|---|---|---|
+| Учёт неопределённости (не только среднее, но и надёжность пилота) | `agent_core/bayes.py`, класс `Posterior` (`get`/`update`/`lcb`/`ucb`/`confirmed_enough`/`pilot_only`) — байесовское normal-normal обновление хранит mean и дисперсию, возвращает mean и sd | [docs/PRIORS.md](docs/PRIORS.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Адаптивная разведка (размер/число пилотов зависят от уже выясненного) | `agent_core/v4.py`, `ExplorerV4.run()` — раунд 1 (10 ячеек), затем winner's-curse recheck топ-3 по наблюдённому ratio, затем `V4_SCREEN_LEFTOVER` досылает оставшиеся пилоты на неисследованные ячейки | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#политика-v4-agent_corev4py), [docs/BENCHMARK.md](docs/BENCHMARK.md) (сравнение V4/V4 top 1/V4 top 3) |
+| Осмысленный выбор канала (под ценность сегмента, не один канал на всё) | `agent_core/planner.py`, `_best_assignment`/`_channel_options`/`_contacts` — перебор каналов по экономике; используется и `Planner`, и `PlannerV4._rank_value` | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), раздел «Финальные кампании» |
+| Устойчивость (результат не разваливается при неудачной серии пилотов) | `tools/stress_eval.py`, `local_eval.py --runs 10` — 60 прогонов (6 вариантов × 10 seeds) | [docs/ROBUSTNESS.md](docs/ROBUSTNESS.md), [docs/BENCHMARK.md](docs/BENCHMARK.md) |
+| LLM в контуре принятия решений | `agent_core/llm_advisor.py`, класс `LLMAdvisor` — реализован и реально протестирован, но **выключен по умолчанию**: активен только при `AGENT_USE_LLM=1` и непустом `OPENAI_API_KEY`; без флага основной путь решений полностью детерминирован | [docs/LLM_RUNS.md](docs/LLM_RUNS.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+
 ## Технологии и зависимости
+
+### Технологии
 
 pandas 3.0.6, numpy 2.4.6, pytest 9.1.1 — версии зафиксированы и проверены
 23.09.2026. Разработка: Python 3.12.3 (Linux); чистая проверка: Python 3.13.9
 (macOS arm64).
+
+### Зависимости
 
 Всё в `requirements.txt` (версии закреплены `==`). Нужен только
 интерпретатор Python — внешних сервисов, БД или Docker не требуется.
