@@ -7,7 +7,9 @@ MAX_CAMPAIGNS = 10
 FINAL_K = 1.5  # final only if mean - FINAL_K * sd > 0
 
 
-SPLIT_COLUMNS = ("data_segment", "call_segment")
+# Sub-segment splits (("data_segment", "call_segment")) are off: on stress_eval they
+# amplified a false positive (39/50 positive vs 40/50 without, same worst case).
+SPLIT_COLUMNS = ()
 
 
 def _channel_options(base_mean, arpu, channels):
