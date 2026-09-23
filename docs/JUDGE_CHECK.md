@@ -1,5 +1,19 @@
 # Clean-clone judge check — 2026-09-23
 
+## Judge check — 2026-09-23 17:18
+
+Commit `9f07509`; macOS arm64; Python 3.13.9. In a fresh clone, the README
+«Быстрый старт» and «Проверка основного сценария» were run literally: all
+commands PASS. The evaluation reported net **3 170 330**, **20 pilots**, and
+**10 final campaigns**. The generated `submission.csv` was byte-identical to
+the committed file. There were no mismatches with the README's expected output.
+
+`bash tools/final_check.sh`: all steps PASS — `clone`, `placeholders`, `venv`,
+`pip_install`, `local_eval`, `local_eval_runs10`, `make_submission`,
+`submission_diff`, and `pytest`.
+
+## Earlier judge check
+
 Tested commit: `c5339ad` in `/tmp/judge-check` on macOS arm64. This was a
 separate clone; the main checkout and its virtual environment were not used
 for the judge run.
