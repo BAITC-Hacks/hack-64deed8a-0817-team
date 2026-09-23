@@ -295,13 +295,17 @@ class Planner:
     def qualifying(self):
         """Per cell: the confirmed target with LCB > 0 and the highest posterior mean."""
         best = {}
-        for cell, target in self._tested():
+        for cell, target in sorted(self._tested()):
             mean, sd = self.post.get(cell, target)
             if not self.post.confirmed_enough(cell, target) or mean - FINAL_K * sd <= 0:
                 continue
             if cell not in best or mean > best[cell][1]:
                 best[cell] = (target, mean)
         return best
+
+    def _rank_value(self, cell, mean, best_pc):
+        """Allocation order of qualifying cells: best expected net per contact."""
+        return best_pc
 
     def _parts(self, cell, column):
         """Disjoint sub-segments of a cell ([whole cell] when column is None)."""
@@ -319,11 +323,11 @@ class Planner:
         money_left = self.env.total_budget - sum(p["cost"] for p in self.pilot_log)
 
         options = []
-        for cell, (target, mean) in self.qualifying().items():
+        for cell, (target, mean) in sorted(self.qualifying().items()):
             per_contact = _channel_options(mean, self.cells[cell]["arpu"], channels)
             best_pc = max(per_contact.values())
             if best_pc > 0:
-                options.append((best_pc, cell, target, mean))
+                options.append((self._rank_value(cell, mean, best_pc), cell, target, mean))
         options.sort(key=lambda x: x[0], reverse=True)
 
         campaigns = []
@@ -404,7 +408,8 @@ Active only when OPENAI_API_KEY is set. The model sees our posterior table and m
   * reorder which of OUR top-6 open arms get confirmed first (no new arms);
   * flag arms it finds suspicious (logged, passed to the final review);
   * remove final campaigns (never add or edit them, never remove all of them).
-Every call: temperature 0, JSON schema output, 20 s timeout, at most MAX_CALLS per run.
+Every call: temperature 0, JSON schema output, 20 s timeout, at most MAX_CALLS per run,
+and no new call once TIME_BUDGET_S seconds have been spent in calls in total.
 Models that only accept the default temperature (the API rejects 0 with
 param "temperature") are retried once without it; that choice is logged and kept.
 Any error, timeout or invalid answer -> our deterministic decision stands.
@@ -414,6 +419,7 @@ Every decision (accepted, rejected or failed) is appended to self.log and logged
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -423,6 +429,7 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 TIMEOUT_S = 20
 MAX_CALLS = 3
+TIME_BUDGET_S = 90  # cumulative wall time in LLM calls per run; further calls are skipped
 TOP_K = 6
 
 SYSTEM_PROMPT = (
@@ -505,11 +512,13 @@ def _http_body(messages, schema_name, schema, temperature):
 
 
 class LLMAdvisor:
-    def __init__(self, transport=None):
+    def __init__(self, transport=None, clock=time.monotonic):
         self.enabled = bool(os.environ.get("OPENAI_API_KEY")) or transport is not None
         self._transport = transport or self._http_transport
+        self._clock = clock
         self._temperature_zero = True
         self.calls = 0
+        self.elapsed = 0.0
         self.suspicious = []
         self.log = []
 
@@ -536,9 +545,14 @@ class LLMAdvisor:
         if self.calls >= MAX_CALLS:
             self._record(step, status="skipped", reason="call limit reached")
             return None
+        if self.elapsed >= TIME_BUDGET_S:
+            self._record(step, status="skipped",
+                         reason=f"time budget spent: {self.elapsed:.1f}s >= {TIME_BUDGET_S}s")
+            return None
         self.calls += 1
         messages = [{"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        started = self._clock()
         try:
             answer = self._transport(messages, schema_name, schema)
             if not isinstance(answer, dict):
@@ -547,6 +561,8 @@ class LLMAdvisor:
         except Exception as e:  # network, timeout, HTTP error, bad JSON: fall back
             self._record(step, status="failed", error=f"{type(e).__name__}: {e}")
             return None
+        finally:
+            self.elapsed += self._clock() - started
 
     def rank_confirmations(self, arms, table):
         """arms: our open arms in our order. Returns the new order (only top-6 reordered)."""
@@ -699,7 +715,7 @@ class Explorer:
 
     def _any_promising(self, tested):
         """Some arm with posterior mean > 0 AND pilot-only mean > 0."""
-        for tariff, segment, target in tested:
+        for tariff, segment, target in sorted(tested):
             cell = (tariff, segment)
             pilot = self.post.pilot_only(cell, target)
             if self.post.get(cell, target)[0] > 0 and pilot is not None and pilot[0] > 0:
@@ -709,7 +725,7 @@ class Explorer:
     def _open_leaders(self, tested):
         """Arms worth confirming, best first: mean > 0, not capped, not yet through the gate."""
         out = []
-        for tariff, segment, target in tested:
+        for tariff, segment, target in sorted(tested):
             cell = (tariff, segment)
             mean, sd = self.post.get(cell, target)
             if mean <= 0 or self.post.n_obs.get((cell, target), 0) >= MAX_PILOTS_PER_ARM:
@@ -742,7 +758,7 @@ class Explorer:
         return rows
 
     def run(self):
-        # Round 1: top candidates by prior UCB x cell value.
+        # Round 1: cells by value (size x mean ARPU), targets by prior mean / upsell price.
         for cell, target in self.candidates()[:ROUND1_PILOTS]:
             if not self._can_pilot(ROUND1_N):
                 break
@@ -765,25 +781,136 @@ class Explorer:
             _, cell, target = open_leaders[0]
             if self.pilot(cell, target, ROUND2_N) is None:
                 break
-            if ADAPTIVE_STOP and any(self._passes_gate((t, s), g) for t, s, g in tested):
+            if ADAPTIVE_STOP and any(self._passes_gate((t, s), g) for t, s, g in sorted(tested)):
                 break
         return self.log
+
+# --- agent_core/v4.py ---
+"""Policy v4: wide screening, winner's-curse re-check, launch every pilot-positive arm.
+
+Pilots: one target per cell (highest prior mean among higher-priced tariffs, never a
+downgrade); the top 10 cells by prior x size x mean ARPU get one sms pilot of 150 on the
+cheapest slice; then up to 5 pilots of 200 re-check the top 3 arms by observed ratio.
+Finals: every arm with pooled pilot estimate > 0 and posterior mean > 0, ranked by
+expected total net, channel and size from the planner economics, no overlapping segments.
+"""
+
+
+V4_ROUND1_PILOTS = 10
+V4_RECHECK_ARMS = 3
+V4_RECHECK_PILOTS = 5
+
+
+class ExplorerV4(Explorer):
+    def candidates(self):
+        """One upsell target per cell (highest prior mean); cells by prior x size x ARPU."""
+        scored = []
+        for cell, info in sorted(self.cells.items()):
+            if info["size"] < MIN_CELL_SIZE:
+                continue
+            upsell = self._upsell_targets(cell[0])
+            if not upsell:
+                continue
+            target = max(upsell, key=lambda t: (self.post.get(cell, t)[0], -upsell.index(t)))
+            prior = self.post.get(cell, target)[0]
+            if prior < 0:
+                continue
+            scored.append((prior * info["size"] * info["arpu"], info["size"] * info["arpu"],
+                           cell, target))
+        # Positive-prior arms first by prior x value; with no informative prior (e.g. no
+        # history table) the nearest upsell of the most valuable cells is still piloted.
+        scored.sort(key=lambda x: (x[0] > 0, x[0], x[1]), reverse=True)
+        return [(cell, target) for _, _, cell, target in scored]
+
+    def run(self):
+        first = {}
+        for cell, target in self.candidates()[:V4_ROUND1_PILOTS]:
+            if not self._can_pilot(ROUND1_N):
+                break
+            res = self.pilot(cell, target, ROUND1_N)
+            if res is not None:
+                first[(cell, target)] = res["observed_lift_ratio"]
+
+        # Winner's-curse check: the top arms by observed ratio get a second look, then
+        # the remaining re-check pilots go to the best pooled estimates that stay positive.
+        top = sorted((arm for arm, ratio in first.items() if ratio > 0),
+                     key=lambda arm: first[arm], reverse=True)[:V4_RECHECK_ARMS]
+        rechecks = 0
+        for cell, target in top:
+            if rechecks >= V4_RECHECK_PILOTS or not self._can_pilot(ROUND2_N):
+                break
+            if self.pilot(cell, target, ROUND2_N) is not None:
+                rechecks += 1
+        while rechecks < V4_RECHECK_PILOTS and self._can_pilot(ROUND2_N):
+            alive = [(self.post.pilot_only(cell, target)[0], cell, target) for cell, target in top
+                     if self.post.pilot_only(cell, target)[0] > 0]
+            if not alive:
+                break
+            _, cell, target = max(alive)
+            if self.pilot(cell, target, ROUND2_N) is None:
+                break
+            rechecks += 1
+        return self.log
+
+
+class PlannerV4(Planner):
+    """Launch every arm with pooled pilot estimate > 0 and posterior mean > 0 (optionally
+    only the `max_finals` best by expected total net)."""
+
+    def __init__(self, env, cells, posterior, pilot_log, max_finals=None):
+        super().__init__(env, cells, posterior, pilot_log)
+        self.max_finals = max_finals
+
+    def qualifying(self):
+        best = {}
+        for cell, target in sorted(self._tested()):
+            mean, _ = self.post.get(cell, target)
+            pilot = self.post.pilot_only(cell, target)
+            if mean <= 0 or pilot is None or pilot[0] <= 0:
+                continue
+            if cell not in best or mean > best[cell][1]:
+                best[cell] = (target, mean)
+        if self.max_finals is not None and len(best) > self.max_finals:
+            ranked = sorted(best.items(), key=lambda kv: self._rank_value(kv[0], kv[1][1], 0.0),
+                            reverse=True)
+            best = dict(ranked[:self.max_finals])
+        return best
+
+    def _rank_value(self, cell, mean, _best_pc):
+        """Expected total net of the whole cell alone, under the full post-pilot budget."""
+        reach = self.env.max_total_contacts - sum(p["n"] for p in self.pilot_log)
+        money = self.env.total_budget - sum(p["cost"] for p in self.pilot_log)
+        return _best_assignment(self._parts(cell, None), mean, self.env.channels, reach, money)[0]
 
 # --- agent.py ---
 """Beeline campaign agent: explore with single-cell pilots, exploit confident cells."""
 
 
+# "v3": confirmation gate (2 pilots, mean - 1.5 sd > 0). "v4": wide screening, re-check,
+# launch every pilot-positive arm (agent_core/v4.py). Benchmarked in docs/BENCHMARK.md.
+POLICY = "v4"
+
 
 class Agent:
+    def __init__(self, policy=None, max_finals=None):
+        self.policy = policy or POLICY
+        self.max_finals = max_finals  # v4 only: launch at most this many finals
+
     def act(self, env):
         set_prior_source(get_history_prior)
         cells = build_cells(env.customer_profile)
         post = Posterior()
         self.advisor = LLMAdvisor()  # inactive without OPENAI_API_KEY
-        explorer = Explorer(env, cells, post, advisor=self.advisor)
-        pilot_log = explorer.run()
+        if self.policy == "v4":
+            explorer = ExplorerV4(env, cells, post, advisor=self.advisor)
+            pilot_log = explorer.run()
+            planner = PlannerV4(env, cells, post, pilot_log, max_finals=self.max_finals)
+        else:
+            explorer = Explorer(env, cells, post, advisor=self.advisor)
+            pilot_log = explorer.run()
+            planner = Planner(env, cells, post, pilot_log)
         self.pilot_log = pilot_log
-        campaigns = Planner(env, cells, post, pilot_log).plan()
+        campaigns = planner.plan()
         if self.advisor.enabled:
             campaigns = self.advisor.review_finals(campaigns, explorer.posterior_table())
         return campaigns

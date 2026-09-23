@@ -83,6 +83,10 @@ class Planner:
                 best[cell] = (target, mean)
         return best
 
+    def _rank_value(self, cell, mean, best_pc):
+        """Allocation order of qualifying cells: best expected net per contact."""
+        return best_pc
+
     def _parts(self, cell, column):
         """Disjoint sub-segments of a cell ([whole cell] when column is None)."""
         profile = self.env.customer_profile
@@ -103,7 +107,7 @@ class Planner:
             per_contact = _channel_options(mean, self.cells[cell]["arpu"], channels)
             best_pc = max(per_contact.values())
             if best_pc > 0:
-                options.append((best_pc, cell, target, mean))
+                options.append((self._rank_value(cell, mean, best_pc), cell, target, mean))
         options.sort(key=lambda x: x[0], reverse=True)
 
         campaigns = []

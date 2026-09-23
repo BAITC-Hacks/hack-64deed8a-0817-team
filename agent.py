@@ -7,18 +7,33 @@ from agent_core.explorer import Explorer
 from agent_core.llm_advisor import LLMAdvisor
 from agent_core.planner import Planner
 from agent_core.priors import set_prior_source
+from agent_core.v4 import ExplorerV4, PlannerV4
+
+# "v3": confirmation gate (2 pilots, mean - 1.5 sd > 0). "v4": wide screening, re-check,
+# launch every pilot-positive arm (agent_core/v4.py). Benchmarked in docs/BENCHMARK.md.
+POLICY = "v4"
 
 
 class Agent:
+    def __init__(self, policy=None, max_finals=None):
+        self.policy = policy or POLICY
+        self.max_finals = max_finals  # v4 only: launch at most this many finals
+
     def act(self, env):
         set_prior_source(priors_history.get_prior)
         cells = build_cells(env.customer_profile)
         post = Posterior()
         self.advisor = LLMAdvisor()  # inactive without OPENAI_API_KEY
-        explorer = Explorer(env, cells, post, advisor=self.advisor)
-        pilot_log = explorer.run()
+        if self.policy == "v4":
+            explorer = ExplorerV4(env, cells, post, advisor=self.advisor)
+            pilot_log = explorer.run()
+            planner = PlannerV4(env, cells, post, pilot_log, max_finals=self.max_finals)
+        else:
+            explorer = Explorer(env, cells, post, advisor=self.advisor)
+            pilot_log = explorer.run()
+            planner = Planner(env, cells, post, pilot_log)
         self.pilot_log = pilot_log
-        campaigns = Planner(env, cells, post, pilot_log).plan()
+        campaigns = planner.plan()
         if self.advisor.enabled:
             campaigns = self.advisor.review_finals(campaigns, explorer.posterior_table())
         return campaigns
